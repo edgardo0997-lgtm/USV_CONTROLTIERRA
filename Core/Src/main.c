@@ -1,0 +1,1662 @@
+/* USER CODE BEGIN Header */
+/**
+  ******************************************************************************
+  * @file           : main.c
+  * @brief          : Main program body
+  ******************************************************************************
+  * @attention
+  *
+  * Copyright (c) 2026 STMicroelectronics.
+  * All rights reserved.
+  *
+  * This software is licensed under terms that can be found in the LICENSE file
+  * in the root directory of this software component.
+  * If no LICENSE file comes with this software, it is provided AS-IS.
+  *
+  ******************************************************************************
+  */
+/* USER CODE END Header */
+/* Includes ------------------------------------------------------------------*/
+#include "main.h"
+#include "adc.h"
+#include "gpdma.h"
+#include "icache.h"
+#include "usart.h"
+#include "gpio.h"
+
+/* Private includes ----------------------------------------------------------*/
+/* USER CODE BEGIN Includes */
+
+/* Procedimientos de control integrados en main.c, sin control_usv.c ni control_usv.h. */
+/* Librería suministrada para leer ADC mediante DMA. */
+#include "adc_x.h"
+
+/* Librería de mapeo utilizada para convertir los valores ADC. */
+#include "MAP_.h"
+
+/* Librería para construir y decodificar las tramas del USV. */
+#include "trama_usv.h"
+
+/* Librería para transmitir y recibir por UART mediante DMA. */
+#include "uart_dma.h"
+
+/* Librería de comunicación con la pantalla Nextion. */
+#include "nextion.h"
+/* USER CODE END Includes */
+
+/* Private typedef -----------------------------------------------------------*/
+/* USER CODE BEGIN PTD */
+
+/* USER CODE END PTD */
+
+/* Private define ------------------------------------------------------------*/
+/* USER CODE BEGIN PD */
+
+/*
+ * ACTUALIZACION DEL PINOUT CONFIRMADA EN usart.c Y main.h:
+ *
+ * - Trama del bote: UART5, PB13 TX y PB12 RX, manejador huart5.
+ * - Pantalla Nextion: USART1, PA9 TX y PA10 RX, manejador huart1.
+ *
+ * Estos dos nombres centralizan el uso de las UART en la aplicacion.
+ * No renombrar huart1 ni huart5: cada uno conserva su instancia y DMA.
+ * La trama de control vigente contiene cinco valores y no utiliza CRC.
+ *
+ * Se conservan literalmente los comentarios originales. Las menciones
+ * originales de USART1 para la trama y UART5 para Nextion describen el
+ * montaje anterior; la asignacion vigente es la indicada arriba.
+ */
+#define USV_UART_TRAMA                 (&huart5)
+#define USV_UART_NEXTION               (&huart1)
+
+/*
+ * ACTUALIZACION VIGENTE:
+ *
+ * Se conservan los comentarios originales de las versiones anteriores.
+ * El comando ahora utiliza directamente las unidades transmitidas:
+ *
+ * - Potencias: porcentajes enteros de 0 a 100.
+ * - Direccion: demanda de giro entera de -100 a +100.
+ * - Camara: grados enteros de -90 a +90.
+ *
+ * No se multiplican ni se dividen los comandos por 10.
+ * Los miembros x10 de la telemetria se mantienen sin cambios.
+ *
+ * Selector MODO_MAN_JOY:
+ *
+ * 0 = modo manual con potenciometros independientes.
+ * 1 = modo joystick con potenciometro general.
+ *
+ * La mezcla de motores se calcula en este archivo.
+ * El receptor aplica las potencias finales sin repetir la mezcla.
+ *
+ * No se modifica el pinout, el reloj, la MPU ni la telemetria recibida.
+ */
+
+/*
+ * ACTUALIZACION VIGENTE DE LAS ENTRADAS DIGITALES:
+ *
+ * Los interruptores y botones conectan sus entradas a GND
+ * cuando se activan. Las entradas utilizan GPIO_PULLUP.
+ *
+ * Contacto abierto:
+ *
+ * - El pull-up mantiene el pin en nivel alto.
+ * - USV_PinActivo() devuelve 0.
+ *
+ * Contacto cerrado a GND:
+ *
+ * - El pin queda en nivel bajo.
+ * - USV_PinActivo() devuelve 1.
+ *
+ * PB15:
+ *
+ * - Abierto, nivel alto: modo manual independiente.
+ * - Conectado a GND, nivel bajo: modo joystick.
+ *
+ * PA15, emergencia:
+ *
+ * - Abierto, nivel alto: boton inactivo.
+ * - Conectado a GND, nivel bajo: parada activa.
+ *
+ * PC7, reconexion:
+ *
+ * - Abierto, nivel alto: boton inactivo.
+ * - Conectado a GND, nivel bajo: solicitud activa.
+ *
+ * PA15 y PC7 deben configurarse en CubeMX como:
+ *
+ * - External Interrupt Mode with Falling edge trigger detection.
+ * - Pull-up.
+ * - Interrupciones EXTI15 y EXTI7 habilitadas en NVIC.
+ *
+ * Se conserva el comportamiento anterior de liberacion de emergencia:
+ * despues de incluir la parada en una transmision DMA aceptada,
+ * puede liberarse si el boton ya esta inactivo.
+ * No se agrega un procedimiento de rearme.
+ *
+ * Los comentarios antiguos sobre pull-down, nivel alto activo
+ * y flanco ascendente describen la version anterior.
+ */
+
+#define USV_POTENCIA_MAXIMA            100U
+#define USV_DIRECCION_MAXIMA           100
+
+
+/*
+ * Índices correspondientes al orden de conversión
+ * configurado en ADC1 dentro de CubeMX.
+ */
+#define ADC_INDICE_POT_GLOBAL          0U
+#define ADC_INDICE_JOY_DIRECCION       1U
+#define ADC_INDICE_POT_BABOR           2U
+#define ADC_INDICE_POT_ESTRIBOR        3U
+#define ADC_INDICE_JOY_CAMARA          4U
+#define ADC_INDICE_VOLTAJE             5U
+
+/* Valor máximo de una conversión ADC de 12 bits. */
+#define ADC_CODIGO_MAXIMO              4095U
+
+/* Voltaje de referencia utilizado por el ADC. */
+#define ADC_VOLTAJE_REFERENCIA         3.3f
+
+/*
+ * Factor correspondiente al divisor resistivo de VOLBAT.
+ *
+ * Está temporalmente en 1.0 porque primero debemos conocer
+ * los valores definitivos de las resistencias utilizadas.
+ *
+ * Ejemplo:
+ *
+ * Si posteriormente el divisor reduce 12 V hasta 3 V,
+ * este factor deberá modificarse según el divisor real.
+ */
+#define VOLBAT_FACTOR_DIVISOR          1.0f
+
+/*
+ * Zona muerta del joystick de dirección.
+ *
+ * El valor está multiplicado por 10:
+ *
+ * 50 = 5.0 % alrededor de la posición central.
+ */
+/*
+ * Vigente: 5 unidades de demanda de giro, sin escala x10.
+ * Mantiene una zona central de aproximadamente +/-5 %.
+ */
+#define DIRECCION_ZONA_MUERTA          5
+
+/*
+ * Zona muerta del joystick de cámara.
+ *
+ * El valor está multiplicado por 10:
+ *
+ * 30 = 3.0 grados alrededor de la posición central.
+ */
+/* Vigente: 3 grados enteros, sin escala x10. */
+#define CAMARA_ZONA_MUERTA             3
+
+/*
+ * Periodo de transmisión hacia el bote.
+ *
+ * 50 ms equivalen a una frecuencia de 20 Hz.
+ */
+/* Vigente: una trama cada 100 ms, equivalente a 10 Hz. */
+#define PERIODO_ENVIO_USV_MS           100U
+
+/*
+ * Indicador de actividad de envio en PB2.
+ * Se supone un LED activo en alto; si la tarjeta lo enciende en bajo,
+ * intercambiar GPIO_PIN_SET y GPIO_PIN_RESET en los dos niveles siguientes.
+ * El LED refleja envios aceptados por DMA, no recepcion confirmada del bote.
+ */
+#define USV_LED_TX_GPIO_PORT           GPIOB
+#define USV_LED_TX_PIN                 GPIO_PIN_2
+#define USV_LED_TX_ENCENDIDO           GPIO_PIN_SET
+#define USV_LED_TX_APAGADO             GPIO_PIN_RESET
+#define USV_LED_TX_SEMIPERIODO_MS       250U
+#define USV_LED_TX_SIN_ENVIO_MS         350U
+
+/*
+ * Periodo de actualización de la pantalla Nextion.
+ *
+ * 250 ms equivalen a cuatro actualizaciones por segundo.
+ */
+#define PERIODO_NEXTION_MS             250U
+
+/*
+ * Tiempo máximo sin recibir telemetría antes de declarar
+ * que la información del bote dejó de estar actualizada.
+ */
+#define TIEMPO_TELEMETRIA_MS           2000U
+
+
+/* La aplicacion necesita exactamente los seis canales acordados. */
+#if adc1_canales != 6
+#error "Configurar adc1_canales y ADC1 con los seis canales del proyecto."
+#endif
+
+/* Verifica que los buffers de UART pueden alojar la trama del protocolo. */
+#if USV_TRAMA_MAXIMA > UART_DMA_TX_BUFFER_SIZE
+#error "El buffer TX UART es menor que USV_TRAMA_MAXIMA."
+#endif
+#if USV_TRAMA_MAXIMA > UART_DMA_LINE_BUFFER_SIZE
+#error "El buffer de lineas UART es menor que USV_TRAMA_MAXIMA."
+#endif
+/* USER CODE END PD */
+
+/* Private macro -------------------------------------------------------------*/
+/* USER CODE BEGIN PM */
+
+/* USER CODE END PM */
+
+/* Private variables ---------------------------------------------------------*/
+
+/* USER CODE BEGIN PV */
+
+/*
+ * Copia estable de los seis valores obtenidos por ADC1.
+ *
+ * El arreglo original adc1_codigo[] es actualizado
+ * continuamente por el DMA.
+ */
+static uint16_t adc_copia[adc1_canales] = {0U};
+
+/*
+ * Lecturas de los controles antes de seleccionar el modo.
+ *
+ * Se guardan separadas de las ordenes finales para que:
+ *
+ * - Una emergencia no borre las lecturas disponibles.
+ * - Un cambio de modo utilice las ultimas muestras recibidas.
+ * - Los controles de un modo no interfieran con el otro.
+ *
+ * Las potencias se almacenan directamente de 0 a 100.
+ * La direccion se almacena directamente de -100 a +100.
+ */
+static uint16_t potencia_general_leida = 0U;
+static uint16_t potencia_babor_leida = 0U;
+static uint16_t potencia_estribor_leida = 0U;
+static int16_t direccion_leida = 0;
+
+/*
+ * Estructura con todas las órdenes que serán enviadas
+ * desde el control de tierra hacia el bote.
+ */
+static USV_Comando comando_tierra = {0};
+
+/*
+ * Estructura donde se almacenará la telemetría
+ * recibida desde el bote.
+ */
+static USV_Telemetria telemetria_bote = {0};
+
+/* Buffer utilizado para construir la trama $PUSVU. */
+static char trama_tx[USV_TRAMA_MAXIMA] = {0};
+
+/* Buffer utilizado para recibir una trama $PUSVD. */
+static char trama_rx[USV_TRAMA_MAXIMA] = {0};
+
+/*
+ * Voltaje calculado a partir del canal VOLBAT.
+ *
+ * Mientras VOLBAT_FACTOR_DIVISOR sea 1.0, representa
+ * solamente el voltaje presente directamente en PC5.
+ */
+static float voltaje_control = 0.0f;
+
+/* Tiempo de la última transmisión hacia el bote. */
+static uint32_t tiempo_ultimo_envio = 0U;
+
+/* Tiempos y estado del LED; solo los utiliza el ciclo principal. */
+static uint32_t tiempo_ultimo_envio_aceptado_led = 0U;
+static uint32_t tiempo_ultimo_cambio_led = 0U;
+static uint8_t led_tx_activo = 0U;
+static uint8_t led_tx_envio_pendiente = 0U;
+
+/* Tiempo de la última actualización de Nextion. */
+static uint32_t tiempo_ultima_nextion = 0U;
+
+/* Tiempo en que se recibió la última telemetría válida. */
+static uint32_t tiempo_ultima_telemetria = 0U;
+
+/*
+ * Indica que existe información válida del bote.
+ *
+ * 0 = no hay telemetría válida.
+ * 1 = telemetría recibida correctamente.
+ */
+static uint8_t telemetria_valida = 0U;
+
+/*
+ * Bandera activada por la interrupción de RECONEXION.
+ *
+ * Permite conservar una pulsación hasta que se envíe
+ * al menos una trama con la solicitud.
+ */
+static volatile uint8_t interrupcion_reconexion = 0U;
+
+/*
+ * Bandera activada por la interrupción de EMERGENCIA.
+ *
+ * Permite que la parada sea atendida inmediatamente y
+ * conservada hasta que se transmita al bote.
+ */
+static volatile uint8_t interrupcion_emergencia = 0U;
+
+/* Cantidad de bytes binarios recibidos desde Nextion. */
+static volatile uint32_t bytes_nextion_recibidos = 0U;
+
+/* Contadores utilizados para diagnóstico de comunicación. */
+static volatile uint32_t errores_usart1 = 0U;
+static volatile uint32_t errores_uart5 = 0U;
+static volatile uint32_t errores_construccion_trama = 0U;
+static volatile uint32_t desbordamientos_usart1 = 0U;
+static volatile uint32_t desbordamientos_uart5 = 0U;
+
+
+/*
+ * Los contadores distinguen un flanco nuevo de uno ya incluido en una
+ * trama. Asi una IRQ nueva no se pierde al liberar una bandera anterior.
+ */
+static volatile uint32_t generacion_emergencia;
+static volatile uint32_t generacion_reconexion;
+
+/* Impide arrancar la aplicacion dos veces sobre los mismos DMA activos. */
+static uint8_t control_iniciado;
+
+/* No solicita propulsion hasta recibir la primera transferencia ADC. */
+static uint8_t adc_muestras_recibidas;
+/* USER CODE END PV */
+
+/* Private function prototypes -----------------------------------------------*/
+void SystemClock_Config(void);
+static void MPU_Config(void);
+/* USER CODE BEGIN PFP */
+
+/* Configura PB2 y mantiene el indicador ligado a envios aceptados. */
+static void USV_IniciarLedTX(void);
+static void USV_RegistrarEnvioLedTX(void);
+static void USV_ActualizarLedTX(void);
+
+/* Lee una entrada digital configurada como activa en nivel alto. */
+/* Vigente: lee una entrada con pull-up, activa en nivel bajo. */
+static uint8_t USV_PinActivo(
+    GPIO_TypeDef *puerto,
+    uint16_t pin);
+
+/* Redondea un valor float al entero más cercano. */
+static int32_t USV_RedondearFloat(float valor);
+
+/* Convierte un código ADC hacia el rango solicitado. */
+static int32_t USV_MapearADC(
+    uint16_t codigo_adc,
+    float salida_minima,
+    float salida_maxima);
+
+/* Actualiza los valores analógicos utilizados por el comando. */
+static void USV_ActualizarAnalogicos(void);
+
+/* Selecciona los controles y calcula la propulsion segun el modo. */
+static void USV_AplicarModoPropulsion(void);
+
+/* Actualiza los interruptores y aplica la seguridad del sistema. */
+static void USV_ActualizarDigitales(void);
+
+/* Procesa las tramas recibidas desde el bote. */
+static void USV_ProcesarRecepcionXBee(void);
+
+/* Recupera los bytes binarios enviados por Nextion. */
+static void USV_ProcesarRecepcionNextion(void);
+
+/* Construye y transmite la trama de control hacia el bote. */
+static void USV_EnviarTramaControl(void);
+
+/* Actualiza los elementos principales de la pantalla Nextion. */
+static void USV_ActualizarPantalla(void);
+
+/* Inicia la aplicacion y comprueba los procedimientos DMA. */
+static HAL_StatusTypeDef USV_IniciarControl(void);
+
+/* Ejecuta los procedimientos del control desde el ciclo principal. */
+static void USV_ProcesarControl(void);
+/* USER CODE END PFP */
+
+/* Private user code ---------------------------------------------------------*/
+/* USER CODE BEGIN 0 */
+
+/* Inicializa solamente PB2; conserva las demas entradas y perifericos. */
+static void USV_IniciarLedTX(void)
+{
+    GPIO_InitTypeDef gpio_led = {0};
+
+    __HAL_RCC_GPIOB_CLK_ENABLE();
+    HAL_GPIO_WritePin(
+        USV_LED_TX_GPIO_PORT, USV_LED_TX_PIN, USV_LED_TX_APAGADO);
+
+    gpio_led.Pin = USV_LED_TX_PIN;
+    gpio_led.Mode = GPIO_MODE_OUTPUT_PP;
+    gpio_led.Pull = GPIO_NOPULL;
+    gpio_led.Speed = GPIO_SPEED_FREQ_LOW;
+    HAL_GPIO_Init(USV_LED_TX_GPIO_PORT, &gpio_led);
+
+    tiempo_ultimo_envio_aceptado_led = 0U;
+    tiempo_ultimo_cambio_led = 0U;
+    led_tx_activo = 0U;
+    led_tx_envio_pendiente = 0U;
+}
+
+/* Se llama exclusivamente cuando UART_DMA_Transmitir() devuelve HAL_OK. */
+static void USV_RegistrarEnvioLedTX(void)
+{
+    uint32_t ahora = HAL_GetTick();
+
+    tiempo_ultimo_envio_aceptado_led = ahora;
+
+    if (led_tx_activo == 0U)
+    {
+        HAL_GPIO_WritePin(
+            USV_LED_TX_GPIO_PORT, USV_LED_TX_PIN, USV_LED_TX_ENCENDIDO);
+        tiempo_ultimo_cambio_led = ahora;
+        led_tx_activo = 1U;
+        led_tx_envio_pendiente = 0U;
+    }
+    else
+    {
+        led_tx_envio_pendiente = 1U;
+    }
+}
+
+/*
+ * Titileo aproximado de 2 Hz, sin HAL_Delay adicional.
+ * Cada cambio requiere un nuevo envio aceptado desde el cambio anterior.
+ * Tras 350 ms sin aceptar otro envio, el indicador queda apagado.
+ * Las restas uint32_t toleran el desbordamiento normal de HAL_GetTick().
+ */
+static void USV_ActualizarLedTX(void)
+{
+    uint32_t ahora;
+
+    if (led_tx_activo == 0U)
+    {
+        return;
+    }
+
+    ahora = HAL_GetTick();
+
+    if ((uint32_t)(ahora - tiempo_ultimo_envio_aceptado_led) >=
+        USV_LED_TX_SIN_ENVIO_MS)
+    {
+        HAL_GPIO_WritePin(
+            USV_LED_TX_GPIO_PORT, USV_LED_TX_PIN, USV_LED_TX_APAGADO);
+        led_tx_activo = 0U;
+        led_tx_envio_pendiente = 0U;
+        return;
+    }
+
+    if ((led_tx_envio_pendiente != 0U) &&
+        ((uint32_t)(ahora - tiempo_ultimo_cambio_led) >=
+         USV_LED_TX_SEMIPERIODO_MS))
+    {
+        HAL_GPIO_TogglePin(USV_LED_TX_GPIO_PORT, USV_LED_TX_PIN);
+        tiempo_ultimo_cambio_led = ahora;
+        led_tx_envio_pendiente = 0U;
+    }
+}
+
+/*
+ * Lee una entrada GPIO activa en nivel alto.
+ *
+ * Todas las entradas del control fueron configuradas
+ * con resistencia pull-down:
+ *
+ * 0 V   = entrada inactiva.
+ * 3.3 V = entrada activa.
+ */
+
+/*
+ * ACTUALIZACION VIGENTE:
+ *
+ * El comentario anterior corresponde al montaje antiguo.
+ * Ahora todas las entradas de interruptores y botones
+ * utilizan pull-up y se activan al conectarse a GND.
+ *
+ * GPIO_PIN_SET:
+ *
+ * - Contacto abierto.
+ * - Entrada inactiva.
+ * - Devuelve 0.
+ *
+ * GPIO_PIN_RESET:
+ *
+ * - Contacto cerrado a GND.
+ * - Entrada activa.
+ * - Devuelve 1.
+ *
+ * Esta conversion es comun para motores, luces, bomba,
+ * selector de modo, reconexion y emergencia.
+ */
+static uint8_t USV_PinActivo(
+    GPIO_TypeDef *puerto,
+    uint16_t pin)
+{
+    if (HAL_GPIO_ReadPin(puerto, pin) == GPIO_PIN_RESET)
+    {
+        return 1U;
+    }
+
+    return 0U;
+}
+
+
+/*
+ * Redondea un número decimal al entero más cercano.
+ *
+ * Se utiliza después de map() para conservar correctamente
+ * los valores positivos y negativos.
+ */
+static int32_t USV_RedondearFloat(float valor)
+{
+    if (valor >= 0.0f)
+    {
+        return (int32_t)(valor + 0.5f);
+    }
+
+    return (int32_t)(valor - 0.5f);
+}
+
+
+/*
+ * Convierte un código ADC de 0 a 4095 hacia un rango
+ * seleccionado mediante la función map() del profesor.
+ */
+static int32_t USV_MapearADC(
+    uint16_t codigo_adc,
+    float salida_minima,
+    float salida_maxima)
+{
+    float resultado;
+
+    /* Protege el cálculo ante un valor superior a 12 bits. */
+    if (codigo_adc > ADC_CODIGO_MAXIMO)
+    {
+        codigo_adc = ADC_CODIGO_MAXIMO;
+    }
+
+    /* Realiza la conversión lineal entre los dos rangos. */
+    resultado = map(
+        (float)codigo_adc,
+        0.0f,
+        (float)ADC_CODIGO_MAXIMO,
+        salida_minima,
+        salida_maxima);
+
+    /* Entrega el valor convertido y redondeado. */
+    return USV_RedondearFloat(resultado);
+}
+
+
+/*
+ * Copia los seis canales ADC y los convierte a las unidades
+ * utilizadas por la trama de comunicación.
+ */
+static void USV_ActualizarAnalogicos(void)
+{
+    uint8_t indice;
+    int32_t direccion;
+    int32_t camara;
+
+    /*
+     * Copia el arreglo actualizado por el DMA.
+     *
+     * Cada elemento uint16_t puede leerse de manera atómica
+     * en el STM32H562.
+     */
+    for (indice = 0U; indice < adc1_canales; indice++)
+    {
+        adc_copia[indice] = adc1_codigo[indice];
+    }
+
+    /*
+     * La copia permite trabajar con valores locales, pero el DMA sigue
+     * activo: seis lecturas atomicas no garantizan un unico barrido ADC.
+     * No se presenta esta copia como una captura simultanea de canales.
+     */
+    adc_muestras_recibidas = 1U;
+
+    /*
+     * ACTUALIZACION DE UNIDADES:
+     *
+     * Los comentarios originales de escala se mantienen debajo.
+     * Las conversiones vigentes son:
+     *
+     * Potenciometros -> 0...100 enteros.
+     * Direccion      -> -100...+100 enteros.
+     * Camara         -> -90...+90 grados enteros.
+     *
+     * Las lecturas de propulsion no se copian directamente al comando.
+     * USV_AplicarModoPropulsion() selecciona las que corresponden.
+     */
+
+    /*
+     * Potenciómetro general:
+     *
+     * ADC 0...4095 -> 0...1000
+     * Trama       -> 0.0...100.0 %
+     */
+    /* Vigente: porcentaje entero 0...100, utilizado en modo joystick. */
+    potencia_general_leida =
+        (uint16_t)USV_MapearADC(
+            adc_copia[ADC_INDICE_POT_GLOBAL],
+            0.0f,
+            (float)USV_POTENCIA_MAXIMA);
+
+    /*
+     * Joystick de dirección:
+     *
+     * ADC 0...4095 -> -1000...+1000
+     * Trama       -> -100.0...+100.0 %
+     */
+    /* Vigente: demanda de giro entera -100...+100, sin escala x10. */
+    direccion = USV_MapearADC(
+        adc_copia[ADC_INDICE_JOY_DIRECCION],
+        -(float)USV_DIRECCION_MAXIMA,
+        (float)USV_DIRECCION_MAXIMA);
+
+    /*
+     * Elimina pequeñas variaciones eléctricas alrededor
+     * de la posición central del joystick.
+     */
+    if ((direccion >= -DIRECCION_ZONA_MUERTA) &&
+        (direccion <= DIRECCION_ZONA_MUERTA))
+    {
+        direccion = 0;
+    }
+
+    /* Se guarda la lectura; solamente gobierna en modo joystick. */
+    direccion_leida = (int16_t)direccion;
+
+    /*
+     * Potenciómetro de babor:
+     *
+     * ADC 0...4095 -> 0.0...100.0 %
+     */
+    /* Porcentaje entero utilizado en modo manual independiente. */
+    potencia_babor_leida =
+        (uint16_t)USV_MapearADC(
+            adc_copia[ADC_INDICE_POT_BABOR],
+            0.0f,
+            (float)USV_POTENCIA_MAXIMA);
+
+    /*
+     * Potenciómetro de estribor:
+     *
+     * ADC 0...4095 -> 0.0...100.0 %
+     */
+    /* Porcentaje entero utilizado en modo manual independiente. */
+    potencia_estribor_leida =
+        (uint16_t)USV_MapearADC(
+            adc_copia[ADC_INDICE_POT_ESTRIBOR],
+            0.0f,
+            (float)USV_POTENCIA_MAXIMA);
+
+    /*
+     * Joystick de cámara:
+     *
+     * ADC 0...4095 -> -900...+900
+     * Trama       -> -90.0...+90.0 grados
+     */
+    /*
+     * Vigente: grados enteros -90...+90.
+     * La camara funciona en ambos modos y no necesita escala x10.
+     */
+    camara = USV_MapearADC(
+        adc_copia[ADC_INDICE_JOY_CAMARA],
+        -90.0f,
+        90.0f);
+
+    /* Aplica una pequeña zona muerta en el centro. */
+    if ((camara >= -CAMARA_ZONA_MUERTA) &&
+        (camara <= CAMARA_ZONA_MUERTA))
+    {
+        camara = 0;
+    }
+
+    comando_tierra.camara = (int16_t)camara;
+
+    /*
+     * Convierte el canal VOLBAT a voltios.
+     *
+     * Cuando se definan las resistencias del divisor,
+     * VOLBAT_FACTOR_DIVISOR deberá actualizarse.
+     */
+    voltaje_control =
+        ((float)adc_copia[ADC_INDICE_VOLTAJE] *
+         ADC_VOLTAJE_REFERENCIA *
+         VOLBAT_FACTOR_DIVISOR) /
+        (float)ADC_CODIGO_MAXIMO;
+}
+
+
+/*
+ * Selecciona los controles segun el modo y calcula las potencias finales.
+ *
+ * modo_joystick = 0:
+ *
+ * - El potenciometro de babor gobierna el motor de babor.
+ * - El potenciometro de estribor gobierna el motor de estribor.
+ * - El potenciometro general no interviene.
+ * - El joystick de direccion no interviene.
+ * - General y direccion se envian en cero.
+ *
+ * modo_joystick = 1:
+ *
+ * - El general establece el limite de potencia para CADA motor.
+ * - El joystick determina la diferencia entre los motores.
+ * - Los potenciometros independientes no intervienen.
+ *
+ * Giro positivo, hacia la derecha:
+ *
+ * - Babor conserva la potencia general.
+ * - Estribor disminuye proporcionalmente.
+ *
+ * Giro negativo, hacia la izquierda:
+ *
+ * - Estribor conserva la potencia general.
+ * - Babor disminuye proporcionalmente.
+ *
+ * Ejemplo con general en 50:
+ *
+ * Direccion    Babor    Estribor
+ *     0          50        50
+ *    50          50        25
+ *   100          50         0
+ *   -50          25        50
+ *  -100           0        50
+ *
+ * No se aumenta ningun motor por encima de la potencia general.
+ * Los resultados se redondean al porcentaje entero mas cercano.
+ *
+ * Las multiplicaciones siguientes forman parte del calculo proporcional;
+ * no son una escala x10 ni una conversion del formato de la trama.
+ *
+ * Las ordenes digitales de avante/atras conservan su funcionamiento.
+ * Este procedimiento no agrega avance automatico.
+ * La seguridad se aplica despues de calcular estas potencias.
+ */
+static void USV_AplicarModoPropulsion(void)
+{
+    uint32_t potencia;
+    int32_t direccion;
+
+    if (comando_tierra.modo_joystick == 0U)
+    {
+        /* En manual se ignoran general y joystick de direccion. */
+        comando_tierra.potencia_global = 0U;
+        comando_tierra.direccion = 0;
+
+        /* Cada motor recibe su potenciometro independiente. */
+        comando_tierra.potencia_babor = potencia_babor_leida;
+        comando_tierra.potencia_estribor = potencia_estribor_leida;
+
+        return;
+    }
+
+    /* En joystick solo intervienen el general y la direccion. */
+    potencia = (uint32_t)potencia_general_leida;
+    direccion = (int32_t)direccion_leida;
+
+    /* Guarda las unidades directamente, sin escala x10. */
+    comando_tierra.potencia_global = (uint16_t)potencia;
+    comando_tierra.direccion = (int16_t)direccion;
+
+    /* Con el joystick centrado ambos motores reciben el general. */
+    comando_tierra.potencia_babor = (uint16_t)potencia;
+    comando_tierra.potencia_estribor = (uint16_t)potencia;
+
+    if (direccion > 0)
+    {
+        /*
+         * Derecha: disminuye estribor y mantiene babor.
+         * Suma medio divisor para redondear el resultado entero.
+         */
+        comando_tierra.potencia_estribor =
+            (uint16_t)(
+                ((potencia *
+                  (uint32_t)(USV_DIRECCION_MAXIMA - direccion)) +
+                 (uint32_t)(USV_DIRECCION_MAXIMA / 2)) /
+                (uint32_t)USV_DIRECCION_MAXIMA);
+    }
+    else if (direccion < 0)
+    {
+        /* Izquierda: disminuye babor y mantiene estribor. */
+        comando_tierra.potencia_babor =
+            (uint16_t)(
+                ((potencia *
+                  (uint32_t)(USV_DIRECCION_MAXIMA + direccion)) +
+                 (uint32_t)(USV_DIRECCION_MAXIMA / 2)) /
+                (uint32_t)USV_DIRECCION_MAXIMA);
+    }
+}
+
+
+/*
+ * Lee todas las entradas digitales y aplica las condiciones
+ * de seguridad antes de construir la trama.
+ */
+static void USV_ActualizarDigitales(void)
+{
+    uint8_t reconexion_pin;
+    uint8_t emergencia_pin;
+
+    /* Lee las órdenes independientes del motor de babor. */
+    comando_tierra.babor_avante =
+        USV_PinActivo(
+            BABOR_AVANTE_GPIO_Port,
+            BABOR_AVANTE_Pin);
+
+    comando_tierra.babor_atras =
+        USV_PinActivo(
+            BABOR_ATRAS_GPIO_Port,
+            BABOR_ATRAS_Pin);
+
+    /* Lee las órdenes independientes del motor de estribor. */
+    comando_tierra.estribor_avante =
+        USV_PinActivo(
+            ESTRIBOR_AVANTE_GPIO_Port,
+            ESTRIBOR_AVANTE_Pin);
+
+    comando_tierra.estribor_atras =
+        USV_PinActivo(
+            ESTRIBOR_ATRAS_GPIO_Port,
+            ESTRIBOR_ATRAS_Pin);
+
+    /* Lee el interruptor de las luces de navegación. */
+    comando_tierra.luces =
+        USV_PinActivo(
+            LUCES_NAV_GPIO_Port,
+            LUCES_NAV_Pin);
+
+    /* Lee el interruptor de la bomba de achique. */
+    comando_tierra.bomba =
+        USV_PinActivo(
+            BOMBA_ACHIQUE_GPIO_Port,
+            BOMBA_ACHIQUE_Pin);
+
+    /* Lee el selector de modo manual por joystick. */
+    /*
+     * Nombre vigente del campo: modo_joystick.
+     *
+     * Pin bajo = manual independiente.
+     * Pin alto = joystick con potenciometro general.
+     */
+    /*
+     * ACTUALIZACION VIGENTE CON PULL-UP:
+     *
+     * El comentario anterior describe la polaridad antigua.
+     *
+     * PB15 abierto, nivel alto:
+     *
+     * - USV_PinActivo() devuelve 0.
+     * - modo_joystick = 0.
+     * - Modo manual con potenciometros independientes.
+     *
+     * PB15 conectado a GND, nivel bajo:
+     *
+     * - USV_PinActivo() devuelve 1.
+     * - modo_joystick = 1.
+     * - Modo joystick con potenciometro general.
+     */
+    comando_tierra.modo_joystick =
+        USV_PinActivo(
+            MODO_MAN_JOY_GPIO_Port,
+            MODO_MAN_JOY_Pin);
+
+    /*
+     * Recalcula desde las lecturas guardadas despues de leer el selector.
+     * Esto tambien permite cambiar de modo entre dos notificaciones ADC.
+     * La emergencia y las fallas tienen prioridad en el bloque posterior.
+     */
+    USV_AplicarModoPropulsion();
+
+    /* Lee físicamente la entrada de reconexión. */
+    reconexion_pin =
+        USV_PinActivo(
+            RECONEXION_GPIO_Port,
+            RECONEXION_Pin);
+
+    /*
+     * La solicitud queda activa si el pin está en alto
+     * o si anteriormente fue detectada por la interrupción.
+     */
+    /*
+     * Vigente: reconexion_pin contiene el estado logico, no el nivel
+     * electrico. Vale 1 cuando PC7 esta conectado a GND.
+     */
+    if ((reconexion_pin != 0U) ||
+        (interrupcion_reconexion != 0U))
+    {
+        comando_tierra.reconexion = 1U;
+    }
+    else
+    {
+        comando_tierra.reconexion = 0U;
+    }
+
+    /* Lee físicamente la parada de emergencia. */
+    emergencia_pin =
+        USV_PinActivo(
+            EMERGENCIA_GPIO_Port,
+            EMERGENCIA_Pin);
+
+    /*
+     * Conserva la emergencia detectada hasta que sea enviada.
+     *
+     * Cuando el botón se encuentra en su posición normal
+     * el pin debe permanecer en nivel bajo.
+     */
+    /*
+     * ACTUALIZACION VIGENTE:
+     *
+     * Boton inactivo, contacto abierto: PA15 en nivel alto.
+     * Boton activado, contacto cerrado a GND: PA15 en nivel bajo.
+     *
+     * emergencia_pin vale 1 cuando la parada esta activada.
+     * Tambien se conserva una pulsacion breve detectada por EXTI.
+     */
+    if (emergencia_pin != 0U)
+    {
+        interrupcion_emergencia = 1U;
+    }
+
+    comando_tierra.parada = interrupcion_emergencia;
+
+    /*
+     * Detecta órdenes contradictorias.
+     *
+     * Un motor no puede recibir simultáneamente una orden
+     * para avanzar y otra para retroceder.
+     */
+    if (((comando_tierra.babor_avante != 0U) &&
+         (comando_tierra.babor_atras != 0U)) ||
+        ((comando_tierra.estribor_avante != 0U) &&
+         (comando_tierra.estribor_atras != 0U)))
+    {
+        comando_tierra.falla_direccion = 1U;
+    }
+    else
+    {
+        comando_tierra.falla_direccion = 0U;
+    }
+
+    /*
+     * Ante una parada de emergencia o una combinación
+     * contradictoria, se anulan todas las órdenes de propulsión.
+     *
+     * Las luces y la bomba no se apagan automáticamente,
+     * ya que pueden ser necesarias durante la emergencia.
+     */
+    /* Tambien mantiene propulsion a cero antes de la primera lectura ADC. */
+    if ((comando_tierra.parada != 0U) ||
+        (comando_tierra.falla_direccion != 0U) ||
+        (adc_muestras_recibidas == 0U))
+    {
+        comando_tierra.potencia_global = 0U;
+        comando_tierra.direccion = 0;
+        comando_tierra.potencia_babor = 0U;
+        comando_tierra.potencia_estribor = 0U;
+
+        comando_tierra.babor_avante = 0U;
+        comando_tierra.babor_atras = 0U;
+        comando_tierra.estribor_avante = 0U;
+        comando_tierra.estribor_atras = 0U;
+    }
+}
+
+
+/*
+ * Busca y procesa todas las líneas completas recibidas
+ * desde el bote mediante USART1.
+ */
+static void USV_ProcesarRecepcionXBee(void)
+{
+    size_t longitud;
+
+    /* Asignacion vigente: telemetria del bote recibida por UART5. */
+    /*
+     * Si el FIFO se desbordó, la información existente
+     * puede estar incompleta y debe considerarse inválida.
+     */
+    if (UART_DMA_HuboDesbordamiento(USV_UART_TRAMA) != 0U)
+    {
+        desbordamientos_uart5++;
+        telemetria_valida = 0U;
+    }
+
+    do
+    {
+        /* Busca una trama completa terminada en '\n'. */
+        longitud = UART_DMA_LeerLinea(
+            USV_UART_TRAMA,
+            trama_rx,
+            sizeof(trama_rx));
+
+        if (longitud > 0U)
+        {
+            /*
+             * Verifica el encabezado, los campos, los rangos
+             * y el CRC antes de aceptar la información.
+             */
+            if (USV_LeerTelemetria(
+                    trama_rx,
+                    &telemetria_bote) != 0U)
+            {
+                telemetria_valida = 1U;
+                tiempo_ultima_telemetria = HAL_GetTick();
+            }
+        }
+
+    } while (longitud > 0U);
+}
+
+
+/*
+ * Recupera los datos binarios enviados por la pantalla Nextion.
+ *
+ * Por ahora los bytes se retiran del FIFO para evitar un
+ * desbordamiento. Cuando tengamos el diseño HMI definitivo,
+ * agregaremos aquí la interpretación de eventos táctiles.
+ */
+static void USV_ProcesarRecepcionNextion(void)
+{
+    uint8_t datos_temporales[32];
+    size_t recibidos;
+
+    /* Asignacion vigente: los bytes de Nextion llegan por USART1. */
+    if (UART_DMA_HuboDesbordamiento(USV_UART_NEXTION) != 0U)
+    {
+        desbordamientos_usart1++;
+    }
+
+    do
+    {
+        recibidos = UART_DMA_Leer(
+            USV_UART_NEXTION,
+            datos_temporales,
+            sizeof(datos_temporales));
+
+        bytes_nextion_recibidos += (uint32_t)recibidos;
+
+    } while (recibidos > 0U);
+}
+
+
+/*
+ * Construye y transmite la trama completa de comandos
+ * mediante USART1_TX y DMA.
+ */
+static void USV_EnviarTramaControl(void)
+{
+    size_t longitud;
+    HAL_StatusTypeDef estado;
+    uint32_t estado_irq;
+    uint32_t emergencia_en_trama;
+    uint32_t generacion_reconexion_observada;
+
+    /*
+     * No intenta modificar el buffer de transmisión
+     * si USART1 todavía está enviando la trama anterior.
+     */
+    /* Consulta UART5, que ahora transmite las ordenes hacia el bote. */
+    if (UART_DMA_TransmisionOcupada(USV_UART_TRAMA) != 0U)
+    {
+        return;
+    }
+
+    /*
+     * Relee las entradas justo antes de construir la trama y captura
+     * los flancos asociados a ella en una seccion corta protegida.
+     * No se transmite ni se espera a HAL con las IRQ bloqueadas.
+     */
+    estado_irq = __get_PRIMASK();
+    __disable_irq();
+    USV_ActualizarDigitales();
+    emergencia_en_trama = generacion_emergencia;
+    generacion_reconexion_observada = generacion_reconexion;
+    __set_PRIMASK(estado_irq);
+
+    /*
+     * Construye la trama compacta $PUSVU sin CRC.
+     * La libreria combina la magnitud y las ordenes fisicas para generar
+     * cada motor entre -100 (atras) y +100 (avante).
+     */
+    longitud = USV_ConstruirComando(
+        trama_tx,
+        sizeof(trama_tx),
+        &comando_tierra);
+
+    /* Una longitud de cero indica un error de construcción. */
+    if (longitud == 0U)
+    {
+        errores_construccion_trama++;
+        return;
+    }
+
+    /* Transmite exactamente los bytes producidos por la trama. */
+    estado = UART_DMA_Transmitir(
+        USV_UART_TRAMA,
+        (const uint8_t *)trama_tx,
+        (uint16_t)longitud);
+
+    if (estado == HAL_OK)
+    {
+        /* No actualiza el LED ante HAL_BUSY, HAL_ERROR ni trama invalida. */
+        USV_RegistrarEnvioLedTX();
+
+        /*
+         * RECONEXION queda reservada internamente para una version futura
+         * y no forma parte de la trama actual. Se libera la pulsacion ya
+         * observada despues de un ciclo aceptado para evitar dejarla fija.
+         * Si llega otro flanco durante el proceso, se conserva.
+         */
+        estado_irq = __get_PRIMASK();
+        __disable_irq();
+
+        if ((comando_tierra.reconexion != 0U) &&
+            (generacion_reconexion == generacion_reconexion_observada))
+        {
+            interrupcion_reconexion = 0U;
+        }
+
+        /*
+         * La emergencia solamente se libera después de enviar
+         * la orden y comprobar que el botón volvió a nivel bajo.
+         */
+        /*
+         * ACTUALIZACION VIGENTE CON PULL-UP:
+         *
+         * El boton inactivo deja PA15 en nivel alto.
+         * USV_PinActivo() devuelve 0 en esa condicion.
+         *
+         * Mientras PA15 permanezca conectado a GND,
+         * USV_PinActivo() devuelve 1 y la emergencia no se libera.
+         *
+         * Se conserva el comportamiento anterior:
+         * HAL_OK confirma el inicio de la transmision DMA,
+         * pero no confirma que el bote recibio la orden.
+         */
+        if ((comando_tierra.parada != 0U) &&
+            (generacion_emergencia == emergencia_en_trama) &&
+            (USV_PinActivo(
+                EMERGENCIA_GPIO_Port,
+                EMERGENCIA_Pin) == 0U))
+        {
+            interrupcion_emergencia = 0U;
+        }
+
+        __set_PRIMASK(estado_irq);
+    }
+}
+
+
+/*
+ * Actualiza los componentes principales de Nextion.
+ *
+ * Mientras no exista telemetría válida se muestra:
+ *
+ * - Temperatura en cero.
+ * - Voltaje medido localmente en PC5.
+ *
+ * Cuando llega una trama $PUSVD válida se muestran la
+ * temperatura y el voltaje reportados por el bote.
+ */
+static void USV_ActualizarPantalla(void)
+{
+    float temperatura_pantalla;
+    float bateria_pantalla;
+    float angulo_camara;
+
+    /* Valores utilizados mientras el bote no envía telemetría. */
+    temperatura_pantalla = 0.0f;
+    bateria_pantalla = voltaje_control;
+
+    /* Utiliza los datos reales del bote cuando estén disponibles. */
+    if (telemetria_valida != 0U)
+    {
+        temperatura_pantalla =
+            (float)telemetria_bote.temperatura_x10 / 10.0f;
+
+        bateria_pantalla =
+            (float)telemetria_bote.voltaje_x10 / 10.0f;
+    }
+
+    /* Camara ya contiene grados enteros; solamente se adapta a float. */
+    angulo_camara = (float)comando_tierra.camara;
+
+    /*
+     * NEXTION_EnviarTrama() agrupa todos los comandos
+     * en una sola transferencia mediante UART5_TX DMA.
+     */
+    /* Asignacion vigente: la transferencia Nextion utiliza USART1 TX. */
+    (void)NEXTION_EnviarTrama(
+        USV_UART_NEXTION,
+        temperatura_pantalla,
+        bateria_pantalla,
+        angulo_camara,
+        comando_tierra.parada);
+}
+
+
+/*
+ * Inicializa la aplicacion despues de los MX_* de CubeMX.
+ * Solo arrancan aqui los procedimientos DMA y las referencias de tiempo;
+ * no se modifica el reloj, la MPU ni el pinout.
+ */
+static HAL_StatusTypeDef USV_IniciarControl(void)
+{
+    HAL_StatusTypeDef estado;
+
+    if (control_iniciado != 0U)
+    {
+        return HAL_BUSY;
+    }
+
+    /*
+     * Verifica que el manejador de UART5 utilizado para
+     * la pantalla Nextion sea válido.
+     */
+    /* Verifica huart1, ahora conectado a la pantalla Nextion. */
+    estado = NEXTION_Init(USV_UART_NEXTION);
+    if (estado != HAL_OK)
+    {
+        return estado;
+    }
+
+    /*
+     * Inicia la recepción circular por DMA de:
+     *
+     * - USART1 para XBee.
+     * - UART5 para Nextion.
+     */
+    /* Inicia ambas UART; sus usos actuales se eligen con los nombres USV_UART_*. */
+    estado = UART_DMA_Iniciar();
+    if (estado != HAL_OK)
+    {
+        return estado;
+    }
+
+    /*
+     * Inicia las seis conversiones de ADC1 mediante DMA.
+     *
+     * El DMA actualiza continuamente adc1_codigo[] siguiendo
+     * el orden de los seis Ranks configurados en CubeMX.
+     */
+    /* Comprueba el resultado y conserva volatile en el arreglo del DMA. */
+    estado = ADC_Read_DMA(
+        &hadc1,
+        adc1_canales,
+        adc1_codigo);
+    if (estado != HAL_OK)
+    {
+        return estado;
+    }
+
+    /* Lee el estado inicial de todos los interruptores. */
+    USV_ActualizarDigitales();
+
+    /* Guarda las referencias iniciales de tiempo. */
+    tiempo_ultimo_envio = HAL_GetTick();
+    tiempo_ultima_nextion = HAL_GetTick();
+
+    control_iniciado = 1U;
+    return HAL_OK;
+}
+
+/*
+ * Ejecuta una vuelta del control. No contiene esperas UART bloqueantes.
+ * El retardo de 1 ms del main original se conserva al final.
+ */
+static void USV_ProcesarControl(void)
+{
+    uint32_t tiempo_actual;
+    uint32_t estado_irq;
+    uint8_t adc_pendiente;
+
+    if (control_iniciado == 0U)
+    {
+        return;
+    }
+
+    /*
+     * Recupera automáticamente cualquier UART que haya
+     * presentado un error durante la comunicación.
+     */
+    UART_DMA_Procesar();
+
+    /* Procesa las tramas recibidas desde el bote. */
+    USV_ProcesarRecepcionXBee();
+
+    /* Recupera los eventos binarios recibidos de Nextion. */
+    USV_ProcesarRecepcionNextion();
+
+    /*
+     * Cuando ADC1 termina una secuencia completa de seis
+     * canales, adc_x.c activa adc1_flag.
+     */
+    /* Consume la bandera sin borrar una nueva notificacion de IRQ. */
+    estado_irq = __get_PRIMASK();
+    __disable_irq();
+    adc_pendiente = adc1_flag;
+    adc1_flag = 0U;
+    __set_PRIMASK(estado_irq);
+
+    if (adc_pendiente != 0U)
+    {
+        USV_ActualizarAnalogicos();
+    }
+
+    /*
+     * Las entradas digitales se revisan continuamente
+     * para atender rápidamente una emergencia.
+     */
+    USV_ActualizarDigitales();
+
+    /* Obtiene el tiempo actual del sistema. */
+    tiempo_actual = HAL_GetTick();
+
+    /*
+     * Invalida la telemetría si el bote permanece
+     * demasiado tiempo sin enviar una trama correcta.
+     */
+    if ((telemetria_valida != 0U) &&
+        ((uint32_t)(tiempo_actual -
+                    tiempo_ultima_telemetria) >=
+         TIEMPO_TELEMETRIA_MS))
+    {
+        telemetria_valida = 0U;
+    }
+
+    /*
+     * Envía la trama de control cada 50 ms.
+     *
+     * El programa no queda detenido porque USART1_TX
+     * utiliza DMA.
+     */
+    /* Vigente: envio por UART5 cada 100 ms, sin bloquear el ciclo. */
+    if ((uint32_t)(tiempo_actual -
+                   tiempo_ultimo_envio) >=
+        PERIODO_ENVIO_USV_MS)
+    {
+        tiempo_ultimo_envio = tiempo_actual;
+        /* La libreria transmite ahora por UART5 sin cambiar el periodo. */
+        USV_EnviarTramaControl();
+    }
+
+    /* Comprueba actividad real de solicitudes DMA aceptadas, no intentos. */
+    USV_ActualizarLedTX();
+
+    /*
+     * Actualiza la pantalla cada 250 ms.
+     *
+     * Si UART5 continúa ocupada, la función simplemente
+     * retorna HAL_BUSY y se intentará nuevamente después.
+     */
+    if ((uint32_t)(tiempo_actual -
+                   tiempo_ultima_nextion) >=
+        PERIODO_NEXTION_MS)
+    {
+        tiempo_ultima_nextion = tiempo_actual;
+        /* La pantalla se actualiza ahora mediante USART1. */
+        USV_ActualizarPantalla();
+    }
+
+    /*
+     * Actualiza los contadores de diagnóstico.
+     *
+     * Estas variables podrán mostrarse posteriormente
+     * en el depurador o en una página de mantenimiento.
+     */
+    /* Los contadores mantienen su nombre fisico: USART1 Nextion, UART5 trama. */
+    errores_usart1 =
+        UART_DMA_CantidadErrores(&huart1);
+
+    errores_uart5 =
+        UART_DMA_CantidadErrores(&huart5);
+
+    /*
+     * Retardo pequeño para evitar ejecutar innecesariamente
+     * el ciclo principal a máxima velocidad.
+     */
+    HAL_Delay(1U);
+}
+/* USER CODE END 0 */
+
+/**
+  * @brief  The application entry point.
+  * @retval int
+  */
+int main(void)
+{
+
+  /* USER CODE BEGIN 1 */
+
+  /* USER CODE END 1 */
+
+  /* MCU Configuration--------------------------------------------------------*/
+
+  /* MPU Configuration--------------------------------------------------------*/
+  MPU_Config();
+
+  /* Reset of all peripherals, Initializes the Flash interface and the Systick. */
+  HAL_Init();
+
+  /* USER CODE BEGIN Init */
+
+  /* USER CODE END Init */
+
+  /* Configure the system clock */
+  SystemClock_Config();
+
+  /* USER CODE BEGIN SysInit */
+
+  /* USER CODE END SysInit */
+
+  /* Initialize all configured peripherals */
+  MX_GPIO_Init();
+  MX_GPDMA1_Init();
+  MX_ADC1_Init();
+  MX_ICACHE_Init();
+  MX_UART5_Init();
+  MX_USART1_UART_Init();
+  /* USER CODE BEGIN 2 */
+
+  /* PB2 queda apagado hasta que UART5 acepte el primer envio del control. */
+  USV_IniciarLedTX();
+
+  /*
+   * Inicia los procedimientos del control despues de los MX_* de CubeMX.
+   * La trama utiliza UART5; la pantalla Nextion utiliza USART1.
+   * La aplicacion permanece en Error_Handler si algun DMA no puede arrancar.
+   */
+  if (USV_IniciarControl() != HAL_OK)
+  {
+      Error_Handler();
+  }
+  /* USER CODE END 2 */
+
+  /* Infinite loop */
+  /* USER CODE BEGIN WHILE */
+  while (1)
+  {
+      /*
+       * Ejecuta lectura de controles, seguridad, trama, telemetria y pantalla.
+       * Los procedimientos estan definidos en este mismo archivo.
+       */
+      USV_ProcesarControl();
+
+    /* USER CODE END WHILE */
+
+    /* USER CODE BEGIN 3 */
+  }
+  /* USER CODE END 3 */
+}
+
+/**
+  * @brief System Clock Configuration
+  * @retval None
+  */
+void SystemClock_Config(void)
+{
+  RCC_OscInitTypeDef RCC_OscInitStruct = {0};
+  RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
+
+  /** Configure the main internal regulator output voltage
+  */
+  __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE3);
+
+  while(!__HAL_PWR_GET_FLAG(PWR_FLAG_VOSRDY)) {}
+
+  /** Initializes the RCC Oscillators according to the specified parameters
+  * in the RCC_OscInitTypeDef structure.
+  */
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI;
+  RCC_OscInitStruct.HSIState = RCC_HSI_ON;
+  RCC_OscInitStruct.HSIDiv = RCC_HSI_DIV2;
+  RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
+  RCC_OscInitStruct.PLL.PLLState = RCC_PLL_NONE;
+  if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /** Initializes the CPU, AHB and APB buses clocks
+  */
+  RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
+                              |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2
+                              |RCC_CLOCKTYPE_PCLK3;
+  RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_HSI;
+  RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
+  RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV1;
+  RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV1;
+  RCC_ClkInitStruct.APB3CLKDivider = RCC_HCLK_DIV1;
+
+  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /** Configure the programming delay
+  */
+  __HAL_FLASH_SET_PROGRAM_DELAY(FLASH_PROGRAMMING_DELAY_0);
+}
+
+/* USER CODE BEGIN 4 */
+
+/*
+ * Callback ejecutado cuando una entrada EXTI detecta
+ * el flanco ascendente configurado en CubeMX.
+ */
+/*
+ * ACTUALIZACION VIGENTE:
+ *
+ * El comentario anterior corresponde a la configuracion antigua.
+ * Los botones ahora conectan a GND al activarse.
+ *
+ * PC7 y PA15 utilizan interrupciones por flanco descendente:
+ *
+ * - Reposo: nivel alto por el pull-up.
+ * - Activacion: transicion desde nivel alto hacia nivel bajo.
+ *
+ * Por eso se utiliza HAL_GPIO_EXTI_Falling_Callback().
+ */
+void HAL_GPIO_EXTI_Falling_Callback(uint16_t GPIO_Pin)
+{
+    /*
+     * Conserva la solicitud de reconexión hasta que
+     * sea incluida en una trama transmitida.
+     */
+    if (GPIO_Pin == RECONEXION_Pin)
+    {
+        generacion_reconexion++;
+        interrupcion_reconexion = 1U;
+    }
+
+    /*
+     * Activa inmediatamente la parada de emergencia.
+     *
+     * La orden de propulsión será llevada a cero antes
+     * de construir la siguiente trama.
+     */
+    if (GPIO_Pin == EMERGENCIA_Pin)
+    {
+        generacion_emergencia++;
+        interrupcion_emergencia = 1U;
+    }
+}
+/* USER CODE END 4 */
+
+ /* MPU Configuration */
+
+void MPU_Config(void)
+{
+  MPU_Region_InitTypeDef MPU_InitStruct = {0};
+  MPU_Attributes_InitTypeDef MPU_AttributesInit = {0};
+
+  /* Disables the MPU */
+  HAL_MPU_Disable();
+
+  /** Initializes and configures the Region 0 and the memory to be protected
+  */
+  MPU_InitStruct.Enable = MPU_REGION_ENABLE;
+  MPU_InitStruct.Number = MPU_REGION_NUMBER0;
+  MPU_InitStruct.BaseAddress = 0x08FFF000;
+  MPU_InitStruct.LimitAddress = 0x08FFFFFF;
+  MPU_InitStruct.AttributesIndex = MPU_ATTRIBUTES_NUMBER0;
+  MPU_InitStruct.AccessPermission = MPU_REGION_ALL_RO;
+  MPU_InitStruct.DisableExec = MPU_INSTRUCTION_ACCESS_DISABLE;
+  MPU_InitStruct.IsShareable = MPU_ACCESS_NOT_SHAREABLE;
+
+  HAL_MPU_ConfigRegion(&MPU_InitStruct);
+
+  /** Initializes and configures the Attribute 0 and the memory to be protected
+  */
+  MPU_AttributesInit.Number = MPU_ATTRIBUTES_NUMBER0;
+  MPU_AttributesInit.Attributes = INNER_OUTER(MPU_NOT_CACHEABLE);
+
+  HAL_MPU_ConfigMemoryAttributes(&MPU_AttributesInit);
+  /* Enables the MPU */
+  HAL_MPU_Enable(MPU_PRIVILEGED_DEFAULT);
+
+}
+
+/**
+  * @brief  This function is executed in case of error occurrence.
+  * @param None
+  * @retval None
+  */
+void Error_Handler(void)
+{
+  /* USER CODE BEGIN Error_Handler_Debug */
+  /* User can add his own implementation to report the HAL error return state */
+  __disable_irq();
+  while (1)
+  {
+  }
+  /* USER CODE END Error_Handler_Debug */
+}
+#ifdef USE_FULL_ASSERT
+/**
+  * @brief  Reports the name of the source file and the source line number
+  *         where the assert_param error has occurred.
+  * @param  file: pointer to the source file name
+  * @param  line: assert_param error line source number
+  * @retval None
+  */
+void assert_failed(uint8_t *file, uint32_t line)
+{
+  /* USER CODE BEGIN 6 */
+  /* User can add his own implementation to report the file name and line number,
+     ex: printf("Wrong parameters value: file %s on line %d\r\n", file, line) */
+  /* USER CODE END 6 */
+}
+#endif /* USE_FULL_ASSERT */

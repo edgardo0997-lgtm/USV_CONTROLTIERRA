@@ -1,0 +1,4 @@
+C:/Users/edgar/OneDrive/Documentos/ING ELECTRONICA/PROYECTO DE GRADO/USV_CONTROLTIERRA/Core/Src/usart.c:39:6:MX_UART5_Init	8	static
+C:/Users/edgar/OneDrive/Documentos/ING ELECTRONICA/PROYECTO DE GRADO/USV_CONTROLTIERRA/Core/Src/usart.c:83:6:MX_USART1_UART_Init	8	static
+C:/Users/edgar/OneDrive/Documentos/ING ELECTRONICA/PROYECTO DE GRADO/USV_CONTROLTIERRA/Core/Src/usart.c:126:6:HAL_UART_MspInit	424	static
+C:/Users/edgar/OneDrive/Documentos/ING ELECTRONICA/PROYECTO DE GRADO/USV_CONTROLTIERRA/Core/Src/usart.c:374:6:HAL_UART_MspDeInit	8	static

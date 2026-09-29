@@ -1,0 +1,4 @@
+C:/Users/edgar/OneDrive/Documentos/ING ELECTRONICA/PROYECTO DE GRADO/USV_CONTROLTIERRA/Core/LIBRERIAS/uart.c:30:6:uartx_write	16	static
+C:/Users/edgar/OneDrive/Documentos/ING ELECTRONICA/PROYECTO DE GRADO/USV_CONTROLTIERRA/Core/LIBRERIAS/uart.c:47:6:uartx_write_text	16	static
+C:/Users/edgar/OneDrive/Documentos/ING ELECTRONICA/PROYECTO DE GRADO/USV_CONTROLTIERRA/Core/LIBRERIAS/uart.c:71:6:uartx_read	16	static
+C:/Users/edgar/OneDrive/Documentos/ING ELECTRONICA/PROYECTO DE GRADO/USV_CONTROLTIERRA/Core/LIBRERIAS/uart.c:100:6:uartx_read_text	40	static

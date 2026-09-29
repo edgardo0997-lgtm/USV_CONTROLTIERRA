@@ -1,0 +1,3 @@
+C:/Users/edgar/OneDrive/Documentos/ING ELECTRONICA/PROYECTO DE GRADO/USV_CONTROLTIERRA/Core/LIBRERIAS/adc_x.c:16:10:ADC_Read	16	static
+C:/Users/edgar/OneDrive/Documentos/ING ELECTRONICA/PROYECTO DE GRADO/USV_CONTROLTIERRA/Core/LIBRERIAS/adc_x.c:43:19:ADC_Read_DMA	8	static
+C:/Users/edgar/OneDrive/Documentos/ING ELECTRONICA/PROYECTO DE GRADO/USV_CONTROLTIERRA/Core/LIBRERIAS/adc_x.c:85:6:HAL_ADC_ConvCpltCallback	0	static

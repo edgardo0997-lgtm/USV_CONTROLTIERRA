@@ -1,0 +1,3 @@
+C:/Users/edgar/OneDrive/Documentos/ING ELECTRONICA/PROYECTO DE GRADO/USV_CONTROLTIERRA/Core/Src/adc.c:33:6:MX_ADC1_Init	40	static
+C:/Users/edgar/OneDrive/Documentos/ING ELECTRONICA/PROYECTO DE GRADO/USV_CONTROLTIERRA/Core/Src/adc.c:132:6:HAL_ADC_MspInit	432	static
+C:/Users/edgar/OneDrive/Documentos/ING ELECTRONICA/PROYECTO DE GRADO/USV_CONTROLTIERRA/Core/Src/adc.c:239:6:HAL_ADC_MspDeInit	8	static
