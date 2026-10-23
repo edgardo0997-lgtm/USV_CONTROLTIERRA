@@ -5,8 +5,8 @@
  *
  * Esta librería será utilizada en el control de tierra para:
  *
- * - USART1: comunicación principal con el módulo XBee.
- * - UART5: comunicación con la pantalla Nextion.
+ * - UART5: comunicación principal con el bote mediante el radio.
+ * - USART1: comunicación con la pantalla Nextion.
  *
  * La recepción funciona continuamente mediante DMA circular
  * y detección de pausas por medio del evento IDLE.
@@ -155,8 +155,8 @@
  *
  * La función inicia:
  *
- * - Recepción circular de USART1 para el XBee.
- * - Recepción circular de UART5 para Nextion.
+ * - Recepción circular de UART5 para la telemetria del bote.
+ * - Recepción circular de USART1 para los eventos de Nextion.
  * - Detección de pausas mediante el evento IDLE.
  *
  * Retorna:
@@ -255,7 +255,7 @@ size_t UART_DMA_DatosDisponibles(
  * No agrega '\0': usar unicamente la cantidad de bytes retornada.
  * Si detecta una discontinuidad, descarta la lectura y retorna 0;
  * no procesar contenido de destino cuando ese retorno sea cero.
- * Ante una perdida en UART5, reiniciar tambien el decodificador
+ * Ante una perdida en USART1, reiniciar tambien el decodificador
  * de respuestas binarias de Nextion para no unir fragmentos.
  */
 
@@ -268,7 +268,7 @@ size_t UART_DMA_Leer(
 /* Busca una línea completa terminada en el carácter '\n'.
  *
  * Esta función está diseñada principalmente para las tramas
- * intercambiadas mediante el XBee.
+ * intercambiadas con el bote mediante UART5.
  *
  * Ejemplos:
  *
@@ -372,11 +372,11 @@ HAL_StatusTypeDef UART_DMA_Transmitir(
  *
  * Ejemplo para enviar una trama al XBee:
  *
- * UART_DMA_TransmitirTexto(&huart1, trama_comando);
+ * UART_DMA_TransmitirTexto(&huart5, trama_comando);
  *
  * Ejemplo para enviar un comando a Nextion:
  *
- * UART_DMA_TransmitirTexto(&huart5, comando_nextion);
+ * UART_DMA_TransmitirTexto(&huart1, comando_nextion);
  *
  * Parámetros:
  *
@@ -410,9 +410,9 @@ HAL_StatusTypeDef UART_DMA_TransmitirTexto(
  *
  * Ejemplo:
  *
- * if (UART_DMA_TransmisionOcupada(&huart1) == 0U)
+ * if (UART_DMA_TransmisionOcupada(&huart5) == 0U)
  * {
- *     UART_DMA_TransmitirTexto(&huart1, trama_comando);
+ *     UART_DMA_TransmitirTexto(&huart5, trama_comando);
  * }
  *
  * Retorna:

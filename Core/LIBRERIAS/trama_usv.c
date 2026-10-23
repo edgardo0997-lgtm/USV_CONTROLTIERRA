@@ -1080,6 +1080,7 @@ uint8_t USV_LeerTelemetria(
 {
     char cuerpo[USV_TRAMA_MAXIMA];
     char *campos[USV_MAXIMO_CAMPOS];
+    USV_Telemetria temporal = {0};
 
     size_t cantidad_campos;
     uint32_t entero;
@@ -1156,7 +1157,7 @@ uint8_t USV_LeerTelemetria(
         return 0U;
     }
 
-    telemetria->calidad_gps = (uint8_t)entero;
+    temporal.calidad_gps = (uint8_t)entero;
 
     /* Cantidad de satélites. */
     if ((USV_LeerEnteroSinSigno(
@@ -1166,7 +1167,7 @@ uint8_t USV_LeerTelemetria(
         return 0U;
     }
 
-    telemetria->satelites = (uint8_t)entero;
+    temporal.satelites = (uint8_t)entero;
 
     /* HDOP. */
     if ((USV_LeerDecimalX10(
@@ -1177,7 +1178,7 @@ uint8_t USV_LeerTelemetria(
         return 0U;
     }
 
-    telemetria->hdop_x10 = (uint16_t)decimal;
+    temporal.hdop_x10 = (uint16_t)decimal;
 
     /* Altitud. */
     if ((USV_LeerDecimalX10(
@@ -1188,7 +1189,7 @@ uint8_t USV_LeerTelemetria(
         return 0U;
     }
 
-    telemetria->altitud_x10 = decimal;
+    temporal.altitud_x10 = decimal;
 
     /* Velocidad SOG. */
     if ((USV_LeerDecimalX10(
@@ -1199,7 +1200,7 @@ uint8_t USV_LeerTelemetria(
         return 0U;
     }
 
-    telemetria->velocidad_x10 =
+    temporal.velocidad_x10 =
         (uint16_t)decimal;
 
     /* Rumbo COG. */
@@ -1211,7 +1212,7 @@ uint8_t USV_LeerTelemetria(
         return 0U;
     }
 
-    telemetria->rumbo_x10 =
+    temporal.rumbo_x10 =
         (uint16_t)decimal;
 
     /* Yaw o azimut. */
@@ -1223,7 +1224,7 @@ uint8_t USV_LeerTelemetria(
         return 0U;
     }
 
-    telemetria->yaw_x10 =
+    temporal.yaw_x10 =
         (uint16_t)decimal;
 
     /* Pitch. */
@@ -1235,7 +1236,7 @@ uint8_t USV_LeerTelemetria(
         return 0U;
     }
 
-    telemetria->pitch_x10 =
+    temporal.pitch_x10 =
         (int16_t)decimal;
 
     /* Roll. */
@@ -1247,7 +1248,7 @@ uint8_t USV_LeerTelemetria(
         return 0U;
     }
 
-    telemetria->roll_x10 =
+    temporal.roll_x10 =
         (int16_t)decimal;
 
     /* Temperatura. */
@@ -1259,7 +1260,7 @@ uint8_t USV_LeerTelemetria(
         return 0U;
     }
 
-    telemetria->temperatura_x10 =
+    temporal.temperatura_x10 =
         (int16_t)decimal;
 
     /* Sensor de inundación. */
@@ -1270,7 +1271,7 @@ uint8_t USV_LeerTelemetria(
         return 0U;
     }
 
-    telemetria->inundacion =
+    temporal.inundacion =
         (uint8_t)entero;
 
     /* Voltaje de batería. */
@@ -1282,7 +1283,7 @@ uint8_t USV_LeerTelemetria(
         return 0U;
     }
 
-    telemetria->voltaje_x10 =
+    temporal.voltaje_x10 =
         (uint16_t)decimal;
 
     /* Corriente. */
@@ -1294,7 +1295,7 @@ uint8_t USV_LeerTelemetria(
         return 0U;
     }
 
-    telemetria->corriente_x10 =
+    temporal.corriente_x10 =
         (uint16_t)decimal;
 
     /* Estado de luces. */
@@ -1305,7 +1306,7 @@ uint8_t USV_LeerTelemetria(
         return 0U;
     }
 
-    telemetria->luces =
+    temporal.luces =
         (uint8_t)entero;
 
     /* Modo solicitado por el USV. */
@@ -1316,19 +1317,25 @@ uint8_t USV_LeerTelemetria(
         return 0U;
     }
 
-    telemetria->modo_solicitado =
+    temporal.modo_solicitado =
         (uint8_t)entero;
 
-    /* Copia las cadenas GPS verificadas. */
-    strcpy(telemetria->utc, campos[1]);
-    strcpy(telemetria->latitud, campos[2]);
-    strcpy(telemetria->longitud, campos[4]);
+    /* Copia las cadenas GPS verificadas en la estructura temporal. */
+    strcpy(temporal.utc, campos[1]);
+    strcpy(temporal.latitud, campos[2]);
+    strcpy(temporal.longitud, campos[4]);
 
-    telemetria->hemisferio_latitud =
+    temporal.hemisferio_latitud =
         campos[3][0];
 
-    telemetria->hemisferio_longitud =
+    temporal.hemisferio_longitud =
         campos[5][0];
+
+    /*
+     * Publica la telemetria solamente despues de validar todos los campos.
+     * Una trama rechazada deja intacta la ultima estructura valida.
+     */
+    *telemetria = temporal;
 
     return 1U;
 }

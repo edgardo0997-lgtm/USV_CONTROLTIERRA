@@ -13,4 +13,4 @@ C:/Users/edgar/OneDrive/Documentos/ING ELECTRONICA/PROYECTO DE GRADO/USV_CONTROL
 C:/Users/edgar/OneDrive/Documentos/ING ELECTRONICA/PROYECTO DE GRADO/USV_CONTROLTIERRA/Core/LIBRERIAS/trama_usv.c:691:8:USV_ConstruirComando	64	static
 C:/Users/edgar/OneDrive/Documentos/ING ELECTRONICA/PROYECTO DE GRADO/USV_CONTROLTIERRA/Core/LIBRERIAS/trama_usv.c:789:9:USV_LeerComando	432	static
 C:/Users/edgar/OneDrive/Documentos/ING ELECTRONICA/PROYECTO DE GRADO/USV_CONTROLTIERRA/Core/LIBRERIAS/trama_usv.c:917:8:USV_ConstruirTelemetria	272	static
-C:/Users/edgar/OneDrive/Documentos/ING ELECTRONICA/PROYECTO DE GRADO/USV_CONTROLTIERRA/Core/LIBRERIAS/trama_usv.c:1077:9:USV_LeerTelemetria	416	static
+C:/Users/edgar/OneDrive/Documentos/ING ELECTRONICA/PROYECTO DE GRADO/USV_CONTROLTIERRA/Core/LIBRERIAS/trama_usv.c:1077:9:USV_LeerTelemetria	504	static

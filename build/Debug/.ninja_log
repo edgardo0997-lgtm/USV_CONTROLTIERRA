@@ -1,41 +1,41 @@
 # ninja log v7
-30	112	8119627389673826	C:/Users/edgar/OneDrive/Documentos/ING ELECTRONICA/PROYECTO DE GRADO/USV_CONTROLTIERRA/build/Debug/CMakeFiles/cmake.verify_globs	1a68f3ad5808c2cd
-155	382	8105793046424482	CMakeFiles/USV_CONTROLTIERRA.dir/startup_stm32h562xx.s.obj	bae639eee692e54
-126	643	8105793046118611	CMakeFiles/USV_CONTROLTIERRA.dir/Core/Src/sysmem.c.obj	e620f8bc28fe7f44
-374	3222	8119627393136002	CMakeFiles/USV_CONTROLTIERRA.dir/Core/LIBRERIAS/trama_usv.c.obj	380912191949fdc8
-140	1165	8105793046276587	CMakeFiles/USV_CONTROLTIERRA.dir/Core/Src/syscalls.c.obj	f0a549a2120c757b
-66	478	8113813911185164	CMakeFiles/USV_CONTROLTIERRA.dir/Core/Src/gpio.c.obj	a008f26fedcf5f91
-223	1590	8113811818689361	CMakeFiles/USV_CONTROLTIERRA.dir/Core/Src/stm32h5xx_hal_msp.c.obj	4a4f03c417909201
-237	2471	8105793047235747	cmake/stm32cubemx/CMakeFiles/STM32_Drivers.dir/__/__/Core/Src/system_stm32h5xx.c.obj	972af1981094c5d9
-183	1532	8113811818265896	CMakeFiles/USV_CONTROLTIERRA.dir/Core/Src/gpdma.c.obj	9c25e915196d5aae
-127	3209	8119627390663598	CMakeFiles/USV_CONTROLTIERRA.dir/Core/Src/main.c.obj	7d8eb54880f1488c
-269	1099	8113000331172083	CMakeFiles/USV_CONTROLTIERRA.dir/Core/LIBRERIAS/MAP_.c.obj	5e691027a2f9e9a
-174	1595	8113811818178806	CMakeFiles/USV_CONTROLTIERRA.dir/Core/Src/adc.c.obj	35c3bd1774d43dd
-202	1593	8113811818484788	CMakeFiles/USV_CONTROLTIERRA.dir/Core/Src/usart.c.obj	8833ac5a0a467da
-276	1586	8113811819205608	CMakeFiles/USV_CONTROLTIERRA.dir/Core/LIBRERIAS/uart.c.obj	992373e0eb6c4913
-212	1576	8113811818542422	CMakeFiles/USV_CONTROLTIERRA.dir/Core/Src/stm32h5xx_it.c.obj	bb231437ac89e73b
-193	1585	8113811818393069	CMakeFiles/USV_CONTROLTIERRA.dir/Core/Src/icache.c.obj	f4d4b3936d5f4f5c
-384	2775	8105793048709035	cmake/stm32cubemx/CMakeFiles/STM32_Drivers.dir/__/__/Drivers/STM32H5xx_HAL_Driver/Src/stm32h5xx_hal_dma.c.obj	e0f9b7a202194ca8
-234	1580	8113811818800127	CMakeFiles/USV_CONTROLTIERRA.dir/Core/LIBRERIAS/adc_x.c.obj	7ec2e8eb63a5ae16
-941	2843	8105793054287122	cmake/stm32cubemx/CMakeFiles/STM32_Drivers.dir/__/__/Drivers/STM32H5xx_HAL_Driver/Src/stm32h5xx_hal_rcc.c.obj	fdab122e8ee61622
-278	2868	8105793047645312	cmake/stm32cubemx/CMakeFiles/STM32_Drivers.dir/__/__/Drivers/STM32H5xx_HAL_Driver/Src/stm32h5xx_hal_adc_ex.c.obj	72681400df2f9234
-643	2953	8105793051268626	cmake/stm32cubemx/CMakeFiles/STM32_Drivers.dir/__/__/Drivers/STM32H5xx_HAL_Driver/Src/stm32h5xx_hal_dma_ex.c.obj	eb2967da00d2a1e0
-253	3022	8105793047407816	cmake/stm32cubemx/CMakeFiles/STM32_Drivers.dir/__/__/Drivers/STM32H5xx_HAL_Driver/Src/stm32h5xx_hal_adc.c.obj	7c72fa18d07b6434
-1166	3460	8105793056536833	cmake/stm32cubemx/CMakeFiles/STM32_Drivers.dir/__/__/Drivers/STM32H5xx_HAL_Driver/Src/stm32h5xx_hal_rcc_ex.c.obj	164d757c5f49b493
-2406	4120	8105793068934939	cmake/stm32cubemx/CMakeFiles/STM32_Drivers.dir/__/__/Drivers/STM32H5xx_HAL_Driver/Src/stm32h5xx_hal_flash.c.obj	42996f876e0ae214
-2526	4172	8105793070135910	cmake/stm32cubemx/CMakeFiles/STM32_Drivers.dir/__/__/Drivers/STM32H5xx_HAL_Driver/Src/stm32h5xx_hal_pwr.c.obj	5121a8dcf0ccbfa7
-2472	4189	8105793069597519	cmake/stm32cubemx/CMakeFiles/STM32_Drivers.dir/__/__/Drivers/STM32H5xx_HAL_Driver/Src/stm32h5xx_hal_gpio.c.obj	22b0149250212c94
-2651	4257	8105793071378998	cmake/stm32cubemx/CMakeFiles/STM32_Drivers.dir/__/__/Drivers/STM32H5xx_HAL_Driver/Src/stm32h5xx_hal_exti.c.obj	53a8c223a8ed5901
-2590	4291	8105793070769127	cmake/stm32cubemx/CMakeFiles/STM32_Drivers.dir/__/__/Drivers/STM32H5xx_HAL_Driver/Src/stm32h5xx_hal_cortex.c.obj	511f82cfbba52673
-2559	4303	8105793070475874	cmake/stm32cubemx/CMakeFiles/STM32_Drivers.dir/__/__/Drivers/STM32H5xx_HAL_Driver/Src/stm32h5xx_hal_pwr_ex.c.obj	e5200288bfaafb9d
-2622	4314	8105793071087777	cmake/stm32cubemx/CMakeFiles/STM32_Drivers.dir/__/__/Drivers/STM32H5xx_HAL_Driver/Src/stm32h5xx_hal.c.obj	f8155b92e8c21671
-2683	4330	8105793071709212	cmake/stm32cubemx/CMakeFiles/STM32_Drivers.dir/__/__/Drivers/STM32H5xx_HAL_Driver/Src/stm32h5xx_hal_icache.c.obj	c067b805d9d7e5eb
-2442	4339	8105793069296500	cmake/stm32cubemx/CMakeFiles/STM32_Drivers.dir/__/__/Drivers/STM32H5xx_HAL_Driver/Src/stm32h5xx_hal_flash_ex.c.obj	588e91dfa92f904e
-2745	4354	8105793072318677	cmake/stm32cubemx/CMakeFiles/STM32_Drivers.dir/__/__/Drivers/STM32H5xx_HAL_Driver/Src/stm32h5xx_hal_uart_ex.c.obj	8e3f32444f9b038
-2713	4531	8105793072004937	cmake/stm32cubemx/CMakeFiles/STM32_Drivers.dir/__/__/Drivers/STM32H5xx_HAL_Driver/Src/stm32h5xx_hal_uart.c.obj	d1ff5721ada0b82e
-3223	6388	8119627421636081	USV_CONTROLTIERRA.elf	79823a80c45afcf3
-40	289	8123960256815410	build.ninja	93ca653927dde733
-40	289	8123960256424860	C:/Users/edgar/OneDrive/Documentos/ING ELECTRONICA/PROYECTO DE GRADO/USV_CONTROLTIERRA/build/Debug/cmake_install.cmake	93ca653927dde733
-40	289	8123960256568950	C:/Users/edgar/OneDrive/Documentos/ING ELECTRONICA/PROYECTO DE GRADO/USV_CONTROLTIERRA/build/Debug/cmake/stm32cubemx/cmake_install.cmake	93ca653927dde733
-292	1597	8113811819385323	CMakeFiles/USV_CONTROLTIERRA.dir/Core/LIBRERIAS/uart_dma.c.obj	3e1f349c47c71a93
-247	1558	8113811818935002	CMakeFiles/USV_CONTROLTIERRA.dir/Core/LIBRERIAS/nextion.c.obj	6b37f093bdd69750
+6	56	8143452592443880	C:/Users/edgar/OneDrive/Documentos/ING ELECTRONICA/PROYECTO DE GRADO/USV_CONTROLTIERRA/build/Debug/CMakeFiles/cmake.verify_globs	1a68f3ad5808c2cd
+225	990	8137772379335377	CMakeFiles/USV_CONTROLTIERRA.dir/startup_stm32h562xx.s.obj	bae639eee692e54
+196	966	8137772379076725	CMakeFiles/USV_CONTROLTIERRA.dir/Core/Src/sysmem.c.obj	e620f8bc28fe7f44
+48	541	8142133412364573	CMakeFiles/USV_CONTROLTIERRA.dir/Core/LIBRERIAS/trama_usv.c.obj	380912191949fdc8
+211	1164	8137772379209871	CMakeFiles/USV_CONTROLTIERRA.dir/Core/Src/syscalls.c.obj	f0a549a2120c757b
+92	1436	8137772378034108	CMakeFiles/USV_CONTROLTIERRA.dir/Core/Src/gpio.c.obj	a008f26fedcf5f91
+178	1626	8137772378897440	CMakeFiles/USV_CONTROLTIERRA.dir/Core/Src/stm32h5xx_hal_msp.c.obj	4a4f03c417909201
+341	1807	8137772380517929	cmake/stm32cubemx/CMakeFiles/STM32_Drivers.dir/__/__/Core/Src/system_stm32h5xx.c.obj	972af1981094c5d9
+120	1417	8137772378315364	CMakeFiles/USV_CONTROLTIERRA.dir/Core/Src/gpdma.c.obj	9c25e915196d5aae
+42	483	8143415585308765	CMakeFiles/USV_CONTROLTIERRA.dir/Core/Src/main.c.obj	7d8eb54880f1488c
+242	902	8137772379532801	CMakeFiles/USV_CONTROLTIERRA.dir/Core/LIBRERIAS/MAP_.c.obj	5e691027a2f9e9a
+105	1545	8137772378142863	CMakeFiles/USV_CONTROLTIERRA.dir/Core/Src/adc.c.obj	35c3bd1774d43dd
+92	924	8143398343204281	CMakeFiles/USV_CONTROLTIERRA.dir/Core/Src/usart.c.obj	8833ac5a0a467da
+309	1872	8137772380203599	CMakeFiles/USV_CONTROLTIERRA.dir/Core/LIBRERIAS/uart.c.obj	992373e0eb6c4913
+163	1516	8137772378733913	CMakeFiles/USV_CONTROLTIERRA.dir/Core/Src/stm32h5xx_it.c.obj	bb231437ac89e73b
+134	1496	8137772378462195	CMakeFiles/USV_CONTROLTIERRA.dir/Core/Src/icache.c.obj	f4d4b3936d5f4f5c
+991	2368	8137772387012610	cmake/stm32cubemx/CMakeFiles/STM32_Drivers.dir/__/__/Drivers/STM32H5xx_HAL_Driver/Src/stm32h5xx_hal_dma.c.obj	e0f9b7a202194ca8
+260	1768	8137772379713054	CMakeFiles/USV_CONTROLTIERRA.dir/Core/LIBRERIAS/adc_x.c.obj	7ec2e8eb63a5ae16
+1417	2807	8137772391288918	cmake/stm32cubemx/CMakeFiles/STM32_Drivers.dir/__/__/Drivers/STM32H5xx_HAL_Driver/Src/stm32h5xx_hal_rcc.c.obj	fdab122e8ee61622
+967	2489	8137772386785056	cmake/stm32cubemx/CMakeFiles/STM32_Drivers.dir/__/__/Drivers/STM32H5xx_HAL_Driver/Src/stm32h5xx_hal_adc_ex.c.obj	72681400df2f9234
+1165	2699	8137772388770932	cmake/stm32cubemx/CMakeFiles/STM32_Drivers.dir/__/__/Drivers/STM32H5xx_HAL_Driver/Src/stm32h5xx_hal_dma_ex.c.obj	eb2967da00d2a1e0
+903	2538	8137772386136114	cmake/stm32cubemx/CMakeFiles/STM32_Drivers.dir/__/__/Drivers/STM32H5xx_HAL_Driver/Src/stm32h5xx_hal_adc.c.obj	7c72fa18d07b6434
+1437	3108	8137772391468048	cmake/stm32cubemx/CMakeFiles/STM32_Drivers.dir/__/__/Drivers/STM32H5xx_HAL_Driver/Src/stm32h5xx_hal_rcc_ex.c.obj	164d757c5f49b493
+1496	2701	8137772392075984	cmake/stm32cubemx/CMakeFiles/STM32_Drivers.dir/__/__/Drivers/STM32H5xx_HAL_Driver/Src/stm32h5xx_hal_flash.c.obj	42996f876e0ae214
+1592	2913	8137772393039833	cmake/stm32cubemx/CMakeFiles/STM32_Drivers.dir/__/__/Drivers/STM32H5xx_HAL_Driver/Src/stm32h5xx_hal_pwr.c.obj	5121a8dcf0ccbfa7
+1545	2887	8137772392558489	cmake/stm32cubemx/CMakeFiles/STM32_Drivers.dir/__/__/Drivers/STM32H5xx_HAL_Driver/Src/stm32h5xx_hal_gpio.c.obj	22b0149250212c94
+1788	3002	8137772394989702	cmake/stm32cubemx/CMakeFiles/STM32_Drivers.dir/__/__/Drivers/STM32H5xx_HAL_Driver/Src/stm32h5xx_hal_exti.c.obj	53a8c223a8ed5901
+1748	3001	8137772394598911	cmake/stm32cubemx/CMakeFiles/STM32_Drivers.dir/__/__/Drivers/STM32H5xx_HAL_Driver/Src/stm32h5xx_hal_cortex.c.obj	511f82cfbba52673
+1626	2969	8137772393371965	cmake/stm32cubemx/CMakeFiles/STM32_Drivers.dir/__/__/Drivers/STM32H5xx_HAL_Driver/Src/stm32h5xx_hal_pwr_ex.c.obj	e5200288bfaafb9d
+1768	3012	8137772394787965	cmake/stm32cubemx/CMakeFiles/STM32_Drivers.dir/__/__/Drivers/STM32H5xx_HAL_Driver/Src/stm32h5xx_hal.c.obj	f8155b92e8c21671
+1807	2992	8137772395189210	cmake/stm32cubemx/CMakeFiles/STM32_Drivers.dir/__/__/Drivers/STM32H5xx_HAL_Driver/Src/stm32h5xx_hal_icache.c.obj	c067b805d9d7e5eb
+1516	2858	8137772392279350	cmake/stm32cubemx/CMakeFiles/STM32_Drivers.dir/__/__/Drivers/STM32H5xx_HAL_Driver/Src/stm32h5xx_hal_flash_ex.c.obj	588e91dfa92f904e
+1939	3047	8137772396495059	cmake/stm32cubemx/CMakeFiles/STM32_Drivers.dir/__/__/Drivers/STM32H5xx_HAL_Driver/Src/stm32h5xx_hal_uart_ex.c.obj	8e3f32444f9b038
+1872	3190	8137772395821365	cmake/stm32cubemx/CMakeFiles/STM32_Drivers.dir/__/__/Drivers/STM32H5xx_HAL_Driver/Src/stm32h5xx_hal_uart.c.obj	d1ff5721ada0b82e
+484	985	8143415589729650	USV_CONTROLTIERRA.elf	79823a80c45afcf3
+40	289	8144660210817780	build.ninja	93ca653927dde733
+40	289	8144660210573893	C:/Users/edgar/OneDrive/Documentos/ING ELECTRONICA/PROYECTO DE GRADO/USV_CONTROLTIERRA/build/Debug/cmake_install.cmake	93ca653927dde733
+40	289	8144660210689459	C:/Users/edgar/OneDrive/Documentos/ING ELECTRONICA/PROYECTO DE GRADO/USV_CONTROLTIERRA/build/Debug/cmake/stm32cubemx/cmake_install.cmake	93ca653927dde733
+104	922	8143398343329228	CMakeFiles/USV_CONTROLTIERRA.dir/Core/LIBRERIAS/uart_dma.c.obj	3e1f349c47c71a93
+51	591	8142281027364412	CMakeFiles/USV_CONTROLTIERRA.dir/Core/LIBRERIAS/nextion.c.obj	6b37f093bdd69750

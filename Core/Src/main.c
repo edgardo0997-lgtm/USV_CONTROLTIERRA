@@ -37,11 +37,14 @@
 /* Librería para construir y decodificar las tramas del USV. */
 #include "trama_usv.h"
 
-/* Librería para transmitir y recibir por UART mediante DMA. */
-#include "uart_dma.h"
-
 /* Librería de comunicación con la pantalla Nextion. */
 #include "nextion.h"
+
+/* memcpy() para retirar de forma segura una trama de la cola de recepcion. */
+#include <string.h>
+
+/* snprintf() para construir el reporte de diagnostico de Teleplot. */
+#include <stdio.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -131,7 +134,7 @@
  * - Interrupciones EXTI15 y EXTI7 habilitadas en NVIC.
  *
  * Se conserva el comportamiento anterior de liberacion de emergencia:
- * despues de incluir la parada en una transmision DMA aceptada,
+ * despues de incluir la parada en una transmision UART completada,
  * puede liberarse si el boton ya esta inactivo.
  * No se agrega un procedimiento de rearme.
  *
@@ -197,51 +200,44 @@
 #define CAMARA_ZONA_MUERTA             3
 
 /*
- * Periodo de transmisión hacia el bote.
+ * Periodo de transmision hacia el bote.
  *
- * 50 ms equivalen a una frecuencia de 20 Hz.
+ * 400 ms equivalen a una frecuencia de 2.5 Hz.
  */
-/* Vigente: una trama cada 100 ms, equivalente a 10 Hz. */
-#define PERIODO_ENVIO_USV_MS           100U
+#define PERIODO_ENVIO_USV_MS           400U
+
+/*
+ * Periodo de lectura de la memoria actualizada por el DMA del ADC.
+ * El DMA permanece circular, pero no genera una interrupcion por cada
+ * secuencia de seis canales; asi no satura la CPU ni detiene UART5.
+ */
+#define PERIODO_LECTURA_ADC_MS           10U
+
+/*
+ * Espera maxima y acotada para la corta trama UART5 a 115200 baudios.
+ * Una trama normal tarda pocos milisegundos. Si UART5 falla, la llamada
+ * regresa y el ciclo vuelve a intentarlo; nunca espera indefinidamente.
+ */
+#define USV_UART_TX_TIMEOUT_MS           10U
+
+/* Dos tramas completas pueden quedar pendientes sin detener el ciclo. */
+#define USV_RX_COLA_TAMANO                2U
 
 /*
  * Indicador de actividad de envio en PB2.
  * Se supone un LED activo en alto; si la tarjeta lo enciende en bajo,
  * intercambiar GPIO_PIN_SET y GPIO_PIN_RESET en los dos niveles siguientes.
- * El LED refleja envios aceptados por DMA, no recepcion confirmada del bote.
+ * El LED refleja envios completados por UART5, no recepcion confirmada del bote.
  */
 #define USV_LED_TX_GPIO_PORT           GPIOB
 #define USV_LED_TX_PIN                 GPIO_PIN_2
 #define USV_LED_TX_ENCENDIDO           GPIO_PIN_SET
 #define USV_LED_TX_APAGADO             GPIO_PIN_RESET
-#define USV_LED_TX_SEMIPERIODO_MS       250U
-#define USV_LED_TX_SIN_ENVIO_MS         350U
-
-/*
- * Periodo de actualización de la pantalla Nextion.
- *
- * 250 ms equivalen a cuatro actualizaciones por segundo.
- */
-#define PERIODO_NEXTION_MS             250U
-
-/*
- * Tiempo máximo sin recibir telemetría antes de declarar
- * que la información del bote dejó de estar actualizada.
- */
-#define TIEMPO_TELEMETRIA_MS           2000U
-
+#define USV_LED_TX_PULSO_MS              100U
 
 /* La aplicacion necesita exactamente los seis canales acordados. */
 #if adc1_canales != 6
 #error "Configurar adc1_canales y ADC1 con los seis canales del proyecto."
-#endif
-
-/* Verifica que los buffers de UART pueden alojar la trama del protocolo. */
-#if USV_TRAMA_MAXIMA > UART_DMA_TX_BUFFER_SIZE
-#error "El buffer TX UART es menor que USV_TRAMA_MAXIMA."
-#endif
-#if USV_TRAMA_MAXIMA > UART_DMA_LINE_BUFFER_SIZE
-#error "El buffer de lineas UART es menor que USV_TRAMA_MAXIMA."
 #endif
 /* USER CODE END PD */
 
@@ -298,6 +294,25 @@ static char trama_tx[USV_TRAMA_MAXIMA] = {0};
 static char trama_rx[USV_TRAMA_MAXIMA] = {0};
 
 /*
+ * Recepcion no bloqueante de UART5.
+ *
+ * La interrupcion recibe un byte, construye una linea y la deposita en una
+ * cola de dos posiciones. El ciclo principal decodifica despues. Ningun CRC,
+ * campo incorrecto, desbordamiento o ausencia de telemetria puede detener
+ * la construccion y el envio periodico de la trama $PUSVU.
+ */
+static uint8_t uart5_rx_byte = 0U;
+static char uart5_rx_construccion[USV_TRAMA_MAXIMA] = {0};
+static volatile uint16_t uart5_rx_longitud = 0U;
+static volatile uint8_t uart5_rx_recibiendo_trama = 0U;
+
+static char uart5_rx_cola[USV_RX_COLA_TAMANO][USV_TRAMA_MAXIMA] = {{0}};
+static volatile uint16_t uart5_rx_cola_longitud[USV_RX_COLA_TAMANO] = {0U};
+static volatile uint8_t uart5_rx_cola_entrada = 0U;
+static volatile uint8_t uart5_rx_cola_salida = 0U;
+static volatile uint8_t uart5_rx_cola_cantidad = 0U;
+
+/*
  * Voltaje calculado a partir del canal VOLBAT.
  *
  * Mientras VOLBAT_FACTOR_DIVISOR sea 1.0, representa
@@ -309,16 +324,14 @@ static float voltaje_control = 0.0f;
 static uint32_t tiempo_ultimo_envio = 0U;
 
 /* Tiempos y estado del LED; solo los utiliza el ciclo principal. */
-static uint32_t tiempo_ultimo_envio_aceptado_led = 0U;
-static uint32_t tiempo_ultimo_cambio_led = 0U;
+static uint32_t tiempo_encendido_led = 0U;
 static uint8_t led_tx_activo = 0U;
-static uint8_t led_tx_envio_pendiente = 0U;
 
-/* Tiempo de la última actualización de Nextion. */
-static uint32_t tiempo_ultima_nextion = 0U;
-
-/* Tiempo en que se recibió la última telemetría válida. */
-static uint32_t tiempo_ultima_telemetria = 0U;
+/*
+ * Solicita actualizar Nextion despues de apagar el pulso de PB2.
+ * Separa el trabajo de USART1 del instante reservado para UART5.
+ */
+static uint8_t nextion_actualizacion_pendiente = 0U;
 
 /*
  * Indica que existe información válida del bote.
@@ -344,15 +357,22 @@ static volatile uint8_t interrupcion_reconexion = 0U;
  */
 static volatile uint8_t interrupcion_emergencia = 0U;
 
-/* Cantidad de bytes binarios recibidos desde Nextion. */
-static volatile uint32_t bytes_nextion_recibidos = 0U;
-
 /* Contadores utilizados para diagnóstico de comunicación. */
-static volatile uint32_t errores_usart1 = 0U;
 static volatile uint32_t errores_uart5 = 0U;
 static volatile uint32_t errores_construccion_trama = 0U;
-static volatile uint32_t desbordamientos_usart1 = 0U;
 static volatile uint32_t desbordamientos_uart5 = 0U;
+
+/* Diagnostico de la recepcion del bote y del envio hacia Nextion. */
+static volatile uint32_t diag_rx5_bytes = 0U;
+static volatile uint32_t diag_rx5_lineas = 0U;
+static uint32_t diag_pusvd_validas = 0U;
+static uint32_t diag_pusvd_crc_o_formato = 0U;
+static uint32_t diag_pusvd_campos_err = 0U;
+static uint16_t diag_rx5_ultima_longitud = 0U;
+static uint32_t diag_ultimo_pusvd_ok_ms = 0U;
+static uint32_t diag_ultimo_reporte_ms = 0U;
+static uint32_t diag_nextion_tx_ok = 0U;
+static uint32_t diag_nextion_tx_error = 0U;
 
 
 /*
@@ -367,6 +387,12 @@ static uint8_t control_iniciado;
 
 /* No solicita propulsion hasta recibir la primera transferencia ADC. */
 static uint8_t adc_muestras_recibidas;
+
+/* Indica que el DMA del ADC arranco y puede leerse periodicamente. */
+static uint8_t adc_dma_activo;
+
+/* Tiempo de la ultima copia de los seis canales ADC. */
+static uint32_t tiempo_ultima_lectura_adc;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -406,11 +432,11 @@ static void USV_ActualizarDigitales(void);
 /* Procesa las tramas recibidas desde el bote. */
 static void USV_ProcesarRecepcionXBee(void);
 
-/* Recupera los bytes binarios enviados por Nextion. */
-static void USV_ProcesarRecepcionNextion(void);
+/* Rearma la recepcion por interrupcion si UART5 quedo disponible. */
+static void USV_AsegurarRecepcionBote(void);
 
 /* Construye y transmite la trama de control hacia el bote. */
-static void USV_EnviarTramaControl(void);
+static uint8_t USV_EnviarTramaControl(void);
 
 /* Actualiza los elementos principales de la pantalla Nextion. */
 static void USV_ActualizarPantalla(void);
@@ -420,10 +446,75 @@ static HAL_StatusTypeDef USV_IniciarControl(void);
 
 /* Ejecuta los procedimientos del control desde el ciclo principal. */
 static void USV_ProcesarControl(void);
+
+/* Envia una vez por segundo los contadores hacia Teleplot por USART2/PA2. */
+static void USV_EnviarDiagnosticoTeleplot(void);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+
+/*
+ * Diagnostico independiente por USART2 TX, pin PA2, a 115200 baudios.
+ * No utiliza UART5 (XBee) ni USART1 (Nextion). Si Teleplot o el adaptador
+ * no estan conectados, la trama $PUSVU continua enviandose normalmente.
+ */
+static void USV_EnviarDiagnosticoTeleplot(void)
+{
+    uint32_t ahora = HAL_GetTick();
+    uint32_t edad_ms;
+    static char salida[420];
+    int longitud;
+
+    if ((uint32_t)(ahora - diag_ultimo_reporte_ms) < 1000U)
+    {
+        return;
+    }
+
+    diag_ultimo_reporte_ms = ahora;
+    edad_ms = (diag_pusvd_validas != 0U) ?
+        (uint32_t)(ahora - diag_ultimo_pusvd_ok_ms) : 0U;
+
+    longitud = snprintf(
+        salida,
+        sizeof(salida),
+        ">rx5_bytes:%lu\r\n"
+        ">rx5_lineas:%lu\r\n"
+        ">pusvd_validas:%lu\r\n"
+        ">pusvd_crc_o_formato:%lu\r\n"
+        ">pusvd_campos_err:%lu\r\n"
+        ">rx5_uart_err:%lu\r\n"
+        ">rx5_hal_error:%lu\r\n"
+        ">rx5_desbordamientos:%lu\r\n"
+        ">rx5_ultima_longitud:%u\r\n"
+        ">pusvd_edad_ms:%lu\r\n"
+        ">nextion_telemetria_valida:%u\r\n"
+        ">nextion_tx_ok:%lu\r\n"
+        ">nextion_tx_error:%lu\r\n",
+        (unsigned long)diag_rx5_bytes,
+        (unsigned long)diag_rx5_lineas,
+        (unsigned long)diag_pusvd_validas,
+        (unsigned long)diag_pusvd_crc_o_formato,
+        (unsigned long)diag_pusvd_campos_err,
+        (unsigned long)errores_uart5,
+        (unsigned long)huart5.ErrorCode,
+        (unsigned long)desbordamientos_uart5,
+        (unsigned int)diag_rx5_ultima_longitud,
+        (unsigned long)edad_ms,
+        (unsigned int)telemetria_valida,
+        (unsigned long)diag_nextion_tx_ok,
+        (unsigned long)diag_nextion_tx_error);
+
+    if ((longitud > 0) && ((size_t)longitud < sizeof(salida)))
+    {
+        /* Espera acotada: un fallo de Teleplot no puede bloquear el control. */
+        (void)HAL_UART_Transmit(
+            &huart2,
+            (uint8_t *)salida,
+            (uint16_t)longitud,
+            35U);
+    }
+}
 
 /* Inicializa solamente PB2; conserva las demas entradas y perifericos. */
 static void USV_IniciarLedTX(void)
@@ -440,37 +531,27 @@ static void USV_IniciarLedTX(void)
     gpio_led.Speed = GPIO_SPEED_FREQ_LOW;
     HAL_GPIO_Init(USV_LED_TX_GPIO_PORT, &gpio_led);
 
-    tiempo_ultimo_envio_aceptado_led = 0U;
-    tiempo_ultimo_cambio_led = 0U;
+    tiempo_encendido_led = 0U;
     led_tx_activo = 0U;
-    led_tx_envio_pendiente = 0U;
-}
-
-/* Se llama exclusivamente cuando UART_DMA_Transmitir() devuelve HAL_OK. */
-static void USV_RegistrarEnvioLedTX(void)
-{
-    uint32_t ahora = HAL_GetTick();
-
-    tiempo_ultimo_envio_aceptado_led = ahora;
-
-    if (led_tx_activo == 0U)
-    {
-        HAL_GPIO_WritePin(
-            USV_LED_TX_GPIO_PORT, USV_LED_TX_PIN, USV_LED_TX_ENCENDIDO);
-        tiempo_ultimo_cambio_led = ahora;
-        led_tx_activo = 1U;
-        led_tx_envio_pendiente = 0U;
-    }
-    else
-    {
-        led_tx_envio_pendiente = 1U;
-    }
 }
 
 /*
- * Titileo aproximado de 2 Hz, sin HAL_Delay adicional.
- * Cada cambio requiere un nuevo envio aceptado desde el cambio anterior.
- * Tras 350 ms sin aceptar otro envio, el indicador queda apagado.
+ * Enciende PB2 durante un pulso visible por cada transmision aceptada.
+ * Se llama exclusivamente cuando HAL_UART_Transmit() devuelve HAL_OK.
+ */
+static void USV_RegistrarEnvioLedTX(void)
+{
+    HAL_GPIO_WritePin(
+        USV_LED_TX_GPIO_PORT, USV_LED_TX_PIN, USV_LED_TX_ENCENDIDO);
+
+    tiempo_encendido_led = HAL_GetTick();
+    led_tx_activo = 1U;
+}
+
+/*
+ * Apaga PB2 cuando finaliza el pulso, sin detener el ciclo con HAL_Delay().
+ * Con una trama cada 400 ms, el LED permanece 100 ms encendido y
+ * aproximadamente 300 ms apagado entre transmisiones aceptadas.
  * Las restas uint32_t toleran el desbordamiento normal de HAL_GetTick().
  */
 static void USV_ActualizarLedTX(void)
@@ -484,23 +565,12 @@ static void USV_ActualizarLedTX(void)
 
     ahora = HAL_GetTick();
 
-    if ((uint32_t)(ahora - tiempo_ultimo_envio_aceptado_led) >=
-        USV_LED_TX_SIN_ENVIO_MS)
+    if ((uint32_t)(ahora - tiempo_encendido_led) >=
+        USV_LED_TX_PULSO_MS)
     {
         HAL_GPIO_WritePin(
             USV_LED_TX_GPIO_PORT, USV_LED_TX_PIN, USV_LED_TX_APAGADO);
         led_tx_activo = 0U;
-        led_tx_envio_pendiente = 0U;
-        return;
-    }
-
-    if ((led_tx_envio_pendiente != 0U) &&
-        ((uint32_t)(ahora - tiempo_ultimo_cambio_led) >=
-         USV_LED_TX_SEMIPERIODO_MS))
-    {
-        HAL_GPIO_TogglePin(USV_LED_TX_GPIO_PORT, USV_LED_TX_PIN);
-        tiempo_ultimo_cambio_led = ahora;
-        led_tx_envio_pendiente = 0U;
     }
 }
 
@@ -1015,103 +1085,138 @@ static void USV_ActualizarDigitales(void)
 
 
 /*
- * Busca y procesa todas las líneas completas recibidas
- * desde el bote mediante USART1.
+ * Procesa las lineas que la interrupcion de UART5 dejo en la cola.
+ *
+ * La decodificacion se realiza fuera de la interrupcion. Una trama erronea
+ * se descarta y no modifica telemetria_bote ni telemetria_valida. De esta
+ * manera Nextion conserva el ultimo valor correcto hasta recibir otro.
  */
 static void USV_ProcesarRecepcionXBee(void)
 {
-    size_t longitud;
+    uint16_t longitud;
+    uint8_t indice;
+    uint32_t estado_irq;
 
-    /* Asignacion vigente: telemetria del bote recibida por UART5. */
-    /*
-     * Si el FIFO se desbordó, la información existente
-     * puede estar incompleta y debe considerarse inválida.
-     */
-    if (UART_DMA_HuboDesbordamiento(USV_UART_TRAMA) != 0U)
+    while (1)
     {
-        desbordamientos_uart5++;
-        telemetria_valida = 0U;
-    }
+        estado_irq = __get_PRIMASK();
+        __disable_irq();
 
-    do
-    {
-        /* Busca una trama completa terminada en '\n'. */
-        longitud = UART_DMA_LeerLinea(
-            USV_UART_TRAMA,
-            trama_rx,
-            sizeof(trama_rx));
+        if (uart5_rx_cola_cantidad == 0U)
+        {
+            __set_PRIMASK(estado_irq);
+            break;
+        }
+
+        indice = uart5_rx_cola_salida;
+        longitud = uart5_rx_cola_longitud[indice];
+
+        if ((longitud > 0U) && (longitud < sizeof(trama_rx)))
+        {
+            memcpy(trama_rx, uart5_rx_cola[indice], longitud + 1U);
+        }
+        else
+        {
+            trama_rx[0] = '\0';
+            longitud = 0U;
+        }
+
+        uart5_rx_cola_salida =
+            (uint8_t)((uart5_rx_cola_salida + 1U) % USV_RX_COLA_TAMANO);
+        uart5_rx_cola_cantidad--;
+
+        __set_PRIMASK(estado_irq);
 
         if (longitud > 0U)
         {
-            /*
-             * Verifica el encabezado, los campos, los rangos
-             * y el CRC antes de aceptar la información.
-             */
-            if (USV_LeerTelemetria(
-                    trama_rx,
-                    &telemetria_bote) != 0U)
+            diag_rx5_ultima_longitud = longitud;
+
+            if (USV_VerificarTrama(trama_rx) == 0U)
             {
+                /* CRC, terminacion o estructura exterior incorrecta. */
+                diag_pusvd_crc_o_formato++;
+            }
+            else if (USV_LeerTelemetria(
+                         trama_rx,
+                         &telemetria_bote) != 0U)
+            {
+                diag_pusvd_validas++;
+                diag_ultimo_pusvd_ok_ms = HAL_GetTick();
                 telemetria_valida = 1U;
-                tiempo_ultima_telemetria = HAL_GetTick();
+            }
+            else
+            {
+                /* CRC correcto, pero identificador, campos o rangos invalidos. */
+                diag_pusvd_campos_err++;
+
+                /*
+                 * Diagnostico temporal: muestra por Teleplot una trama
+                 * rechazada cada tres segundos para revisar sus 31 campos.
+                 * Esta salida utiliza USART2/PA2 y no modifica UART5 ni
+                 * detiene el envio periodico de la trama $PUSVU al bote.
+                 */
+                {
+                    static uint32_t ultimo_dump_ms = 0U;
+                    uint32_t ahora = HAL_GetTick();
+
+                    if ((uint32_t)(ahora - ultimo_dump_ms) >= 3000U)
+                    {
+                        static const char etiqueta[] = "TRAMA_RX: ";
+
+                        ultimo_dump_ms = ahora;
+
+                        (void)HAL_UART_Transmit(
+                            &huart2,
+                            (uint8_t *)etiqueta,
+                            (uint16_t)(sizeof(etiqueta) - 1U),
+                            50U);
+
+                        (void)HAL_UART_Transmit(
+                            &huart2,
+                            (uint8_t *)trama_rx,
+                            (uint16_t)strlen(trama_rx),
+                            100U);
+                    }
+                }
             }
         }
-
-    } while (longitud > 0U);
-}
-
-
-/*
- * Recupera los datos binarios enviados por la pantalla Nextion.
- *
- * Por ahora los bytes se retiran del FIFO para evitar un
- * desbordamiento. Cuando tengamos el diseño HMI definitivo,
- * agregaremos aquí la interpretación de eventos táctiles.
- */
-static void USV_ProcesarRecepcionNextion(void)
-{
-    uint8_t datos_temporales[32];
-    size_t recibidos;
-
-    /* Asignacion vigente: los bytes de Nextion llegan por USART1. */
-    if (UART_DMA_HuboDesbordamiento(USV_UART_NEXTION) != 0U)
-    {
-        desbordamientos_usart1++;
+        /* Si es invalida, se ignora sin detener ni borrar datos anteriores. */
     }
-
-    do
-    {
-        recibidos = UART_DMA_Leer(
-            USV_UART_NEXTION,
-            datos_temporales,
-            sizeof(datos_temporales));
-
-        bytes_nextion_recibidos += (uint32_t)recibidos;
-
-    } while (recibidos > 0U);
 }
 
 
 /*
- * Construye y transmite la trama completa de comandos
- * mediante USART1_TX y DMA.
+ * Si un error de UART dejo detenida la recepcion, intenta rearmarla.
+ * La llamada es no bloqueante. Su resultado no afecta el envio por PB13.
  */
-static void USV_EnviarTramaControl(void)
+static void USV_AsegurarRecepcionBote(void)
+{
+    if (USV_UART_TRAMA->RxState == HAL_UART_STATE_READY)
+    {
+        if (HAL_UART_Receive_IT(
+                USV_UART_TRAMA,
+                &uart5_rx_byte,
+                1U) != HAL_OK)
+        {
+            errores_uart5++;
+        }
+    }
+}
+
+
+/*
+ * Construye y transmite la trama completa de comandos por UART5.
+ * La trama es corta y se envia cada 400 ms, por lo que una transmision
+ * directa de aproximadamente 3 ms evita depender del callback del DMA TX.
+ * La recepcion de UART5 y la comunicacion Nextion conservan sus DMA.
+ */
+static uint8_t USV_EnviarTramaControl(void)
 {
     size_t longitud;
     HAL_StatusTypeDef estado;
     uint32_t estado_irq;
     uint32_t emergencia_en_trama;
     uint32_t generacion_reconexion_observada;
-
-    /*
-     * No intenta modificar el buffer de transmisión
-     * si USART1 todavía está enviando la trama anterior.
-     */
-    /* Consulta UART5, que ahora transmite las ordenes hacia el bote. */
-    if (UART_DMA_TransmisionOcupada(USV_UART_TRAMA) != 0U)
-    {
-        return;
-    }
 
     /*
      * Relee las entradas justo antes de construir la trama y captura
@@ -1139,14 +1244,18 @@ static void USV_EnviarTramaControl(void)
     if (longitud == 0U)
     {
         errores_construccion_trama++;
-        return;
+        return 0U;
     }
 
-    /* Transmite exactamente los bytes producidos por la trama. */
-    estado = UART_DMA_Transmitir(
+    /*
+     * Transmite exactamente los bytes producidos por la trama.
+     * UART no necesita que exista un receptor conectado para finalizar.
+     */
+    estado = HAL_UART_Transmit(
         USV_UART_TRAMA,
-        (const uint8_t *)trama_tx,
-        (uint16_t)longitud);
+        (uint8_t *)trama_tx,
+        (uint16_t)longitud,
+        USV_UART_TX_TIMEOUT_MS);
 
     if (estado == HAL_OK)
     {
@@ -1182,7 +1291,7 @@ static void USV_EnviarTramaControl(void)
          * USV_PinActivo() devuelve 1 y la emergencia no se libera.
          *
          * Se conserva el comportamiento anterior:
-         * HAL_OK confirma el inicio de la transmision DMA,
+         * HAL_OK confirma que UART5 termino de sacar los bytes,
          * pero no confirma que el bote recibio la orden.
          */
         if ((comando_tierra.parada != 0U) &&
@@ -1195,55 +1304,39 @@ static void USV_EnviarTramaControl(void)
         }
 
         __set_PRIMASK(estado_irq);
+
+        return 1U;
     }
+
+    return 0U;
 }
 
 
 /*
- * Actualiza los componentes principales de Nextion.
- *
- * Mientras no exista telemetría válida se muestra:
- *
- * - Temperatura en cero.
- * - Voltaje medido localmente en PC5.
- *
- * Cuando llega una trama $PUSVD válida se muestran la
- * temperatura y el voltaje reportados por el bote.
+ * Entrega a Nextion toda la telemetria $PUSVD ya validada, junto con los
+ * controles locales. USART1 permanece independiente de UART5: si la
+ * pantalla esta ocupada o falla, se descarta solamente esa actualizacion.
  */
 static void USV_ActualizarPantalla(void)
 {
-    float temperatura_pantalla;
-    float bateria_pantalla;
-    float angulo_camara;
+    HAL_StatusTypeDef estado_nextion;
 
-    /* Valores utilizados mientras el bote no envía telemetría. */
-    temperatura_pantalla = 0.0f;
-    bateria_pantalla = voltaje_control;
-
-    /* Utiliza los datos reales del bote cuando estén disponibles. */
-    if (telemetria_valida != 0U)
-    {
-        temperatura_pantalla =
-            (float)telemetria_bote.temperatura_x10 / 10.0f;
-
-        bateria_pantalla =
-            (float)telemetria_bote.voltaje_x10 / 10.0f;
-    }
-
-    /* Camara ya contiene grados enteros; solamente se adapta a float. */
-    angulo_camara = (float)comando_tierra.camara;
-
-    /*
-     * NEXTION_EnviarTrama() agrupa todos los comandos
-     * en una sola transferencia mediante UART5_TX DMA.
-     */
-    /* Asignacion vigente: la transferencia Nextion utiliza USART1 TX. */
-    (void)NEXTION_EnviarTrama(
+    estado_nextion = NEXTION_EnviarEstadoUSV(
         USV_UART_NEXTION,
-        temperatura_pantalla,
-        bateria_pantalla,
-        angulo_camara,
-        comando_tierra.parada);
+        &telemetria_bote,
+        telemetria_valida,
+        &comando_tierra,
+        voltaje_control);
+
+    if (estado_nextion == HAL_OK)
+    {
+        diag_nextion_tx_ok++;
+    }
+    else
+    {
+        /* Incluye HAL_BUSY y HAL_ERROR; no afecta el envio hacia el bote. */
+        diag_nextion_tx_error++;
+    }
 }
 
 
@@ -1266,24 +1359,24 @@ static HAL_StatusTypeDef USV_IniciarControl(void)
      * la pantalla Nextion sea válido.
      */
     /* Verifica huart1, ahora conectado a la pantalla Nextion. */
-    estado = NEXTION_Init(USV_UART_NEXTION);
-    if (estado != HAL_OK)
-    {
-        return estado;
-    }
+    /*
+     * Una falla de la pantalla no debe impedir el envio hacia el bote.
+     * Las funciones de Nextion rechazaran sus propias transferencias
+     * mientras la interfaz no se encuentre disponible.
+     */
+    /* Una falla de Nextion no impide iniciar ni transmitir hacia el bote. */
+    (void)NEXTION_Init(USV_UART_NEXTION);
 
     /*
-     * Inicia la recepción circular por DMA de:
-     *
-     * - USART1 para XBee.
-     * - UART5 para Nextion.
+     * UART5 recibe la telemetria byte a byte mediante interrupcion.
+     * No se inicia la capa UART DMA y tampoco se recibe desde Nextion:
+     * USART1 se utiliza solamente para entregar datos a la pantalla.
+     * Si esta primera solicitud falla, el ciclo principal vuelve a intentarla.
      */
-    /* Inicia ambas UART; sus usos actuales se eligen con los nombres USV_UART_*. */
-    estado = UART_DMA_Iniciar();
-    if (estado != HAL_OK)
-    {
-        return estado;
-    }
+    (void)HAL_UART_Receive_IT(
+        USV_UART_TRAMA,
+        &uart5_rx_byte,
+        1U);
 
     /*
      * Inicia las seis conversiones de ADC1 mediante DMA.
@@ -1291,6 +1384,15 @@ static HAL_StatusTypeDef USV_IniciarControl(void)
      * El DMA actualiza continuamente adc1_codigo[] siguiendo
      * el orden de los seis Ranks configurados en CubeMX.
      */
+    /*
+     * El DMA circular actualiza adc1_codigo[] por hardware. No necesitamos
+     * una interrupcion por cada secuencia de seis conversiones. Con el ADC
+     * continuo esa interrupcion ocurriria decenas de miles de veces por
+     * segundo y podria impedir que el ciclo principal atienda UART5.
+     */
+    HAL_NVIC_DisableIRQ(GPDMA1_Channel0_IRQn);
+    HAL_NVIC_ClearPendingIRQ(GPDMA1_Channel0_IRQn);
+
     /* Comprueba el resultado y conserva volatile en el arreglo del DMA. */
     estado = ADC_Read_DMA(
         &hadc1,
@@ -1298,16 +1400,28 @@ static HAL_StatusTypeDef USV_IniciarControl(void)
         adc1_codigo);
     if (estado != HAL_OK)
     {
-        return estado;
+        /*
+         * Sin ADC se conservan las potencias en cero por seguridad,
+         * pero UART5 continua enviando la trama periodicamente.
+         */
+        adc_dma_activo = 0U;
+        adc_muestras_recibidas = 0U;
+    }
+    else
+    {
+        /* Da tiempo a que el DMA complete varias secuencias iniciales. */
+        HAL_Delay(1U);
+        USV_ActualizarAnalogicos();
+        adc_dma_activo = 1U;
     }
 
     /* Lee el estado inicial de todos los interruptores. */
     USV_ActualizarDigitales();
 
     /* Guarda las referencias iniciales de tiempo. */
-    tiempo_ultimo_envio = HAL_GetTick();
-    tiempo_ultima_nextion = HAL_GetTick();
-
+    /* Permite realizar el primer envio inmediatamente al entrar al ciclo. */
+    tiempo_ultimo_envio = HAL_GetTick() - PERIODO_ENVIO_USV_MS;
+    tiempo_ultima_lectura_adc = HAL_GetTick();
     control_iniciado = 1U;
     return HAL_OK;
 }
@@ -1319,8 +1433,6 @@ static HAL_StatusTypeDef USV_IniciarControl(void)
 static void USV_ProcesarControl(void)
 {
     uint32_t tiempo_actual;
-    uint32_t estado_irq;
-    uint8_t adc_pendiente;
 
     if (control_iniciado == 0U)
     {
@@ -1328,30 +1440,24 @@ static void USV_ProcesarControl(void)
     }
 
     /*
-     * Recupera automáticamente cualquier UART que haya
-     * presentado un error durante la comunicación.
+     * La recepcion es independiente del transmisor. Si una interrupcion o
+     * un error la dejo libre, se rearma sin esperar y sin afectar UART5 TX.
      */
-    UART_DMA_Procesar();
-
-    /* Procesa las tramas recibidas desde el bote. */
+    USV_AsegurarRecepcionBote();
     USV_ProcesarRecepcionXBee();
 
-    /* Recupera los eventos binarios recibidos de Nextion. */
-    USV_ProcesarRecepcionNextion();
+    /* Obtiene el tiempo actual del sistema. */
+    tiempo_actual = HAL_GetTick();
 
     /*
-     * Cuando ADC1 termina una secuencia completa de seis
-     * canales, adc_x.c activa adc1_flag.
+     * El DMA actualiza el arreglo continuamente sin interrumpir la CPU.
+     * El ciclo copia y convierte los seis canales cada 10 ms.
      */
-    /* Consume la bandera sin borrar una nueva notificacion de IRQ. */
-    estado_irq = __get_PRIMASK();
-    __disable_irq();
-    adc_pendiente = adc1_flag;
-    adc1_flag = 0U;
-    __set_PRIMASK(estado_irq);
-
-    if (adc_pendiente != 0U)
+    if ((adc_dma_activo != 0U) &&
+        ((uint32_t)(tiempo_actual - tiempo_ultima_lectura_adc) >=
+         PERIODO_LECTURA_ADC_MS))
     {
+        tiempo_ultima_lectura_adc = tiempo_actual;
         USV_ActualizarAnalogicos();
     }
 
@@ -1361,72 +1467,52 @@ static void USV_ProcesarControl(void)
      */
     USV_ActualizarDigitales();
 
-    /* Obtiene el tiempo actual del sistema. */
-    tiempo_actual = HAL_GetTick();
-
     /*
-     * Invalida la telemetría si el bote permanece
-     * demasiado tiempo sin enviar una trama correcta.
+     * No se invalida ni se borra la ultima telemetria correcta por tiempo.
+     * Una trama ausente o incorrecta simplemente no refresca la pantalla.
      */
-    if ((telemetria_valida != 0U) &&
-        ((uint32_t)(tiempo_actual -
-                    tiempo_ultima_telemetria) >=
-         TIEMPO_TELEMETRIA_MS))
-    {
-        telemetria_valida = 0U;
-    }
 
     /*
-     * Envía la trama de control cada 50 ms.
+     * Envia la trama de control cada 400 ms.
      *
-     * El programa no queda detenido porque USART1_TX
-     * utiliza DMA.
+     * UART5 transmite directamente y no depende del estado de Nextion.
      */
-    /* Vigente: envio por UART5 cada 100 ms, sin bloquear el ciclo. */
+    /* Envio por UART5 cada 400 ms, sin bloquear el ciclo. */
     if ((uint32_t)(tiempo_actual -
                    tiempo_ultimo_envio) >=
         PERIODO_ENVIO_USV_MS)
     {
-        tiempo_ultimo_envio = tiempo_actual;
-        /* La libreria transmite ahora por UART5 sin cambiar el periodo. */
-        USV_EnviarTramaControl();
+        /*
+         * La referencia de tiempo solo avanza cuando UART5 completa el envio.
+         * Si estaba ocupada o presento un error, se reintenta desde el
+         * ciclo principal sin esperar otros 400 ms.
+         */
+        if (USV_EnviarTramaControl() != 0U)
+        {
+            tiempo_ultimo_envio = tiempo_actual;
+            nextion_actualizacion_pendiente = 1U;
+        }
     }
 
-    /* Comprueba actividad real de solicitudes DMA aceptadas, no intentos. */
+    /* Actualiza la duracion del pulso generado por un envio completado. */
     USV_ActualizarLedTX();
 
     /*
-     * Actualiza la pantalla cada 250 ms.
-     *
-     * Si UART5 continúa ocupada, la función simplemente
-     * retorna HAL_BUSY y se intentará nuevamente después.
+     * Espera a que PB2 complete su pulso visible antes de atender Nextion.
+     * La trama al bote ya salio y la pantalla conserva todos sus campos.
      */
-    if ((uint32_t)(tiempo_actual -
-                   tiempo_ultima_nextion) >=
-        PERIODO_NEXTION_MS)
+    if ((nextion_actualizacion_pendiente != 0U) &&
+        (led_tx_activo == 0U))
     {
-        tiempo_ultima_nextion = tiempo_actual;
-        /* La pantalla se actualiza ahora mediante USART1. */
+        nextion_actualizacion_pendiente = 0U;
         USV_ActualizarPantalla();
     }
-
-    /*
-     * Actualiza los contadores de diagnóstico.
-     *
-     * Estas variables podrán mostrarse posteriormente
-     * en el depurador o en una página de mantenimiento.
-     */
-    /* Los contadores mantienen su nombre fisico: USART1 Nextion, UART5 trama. */
-    errores_usart1 =
-        UART_DMA_CantidadErrores(&huart1);
-
-    errores_uart5 =
-        UART_DMA_CantidadErrores(&huart5);
 
     /*
      * Retardo pequeño para evitar ejecutar innecesariamente
      * el ciclo principal a máxima velocidad.
      */
+    USV_EnviarDiagnosticoTeleplot();
     HAL_Delay(1U);
 }
 /* USER CODE END 0 */
@@ -1468,6 +1554,7 @@ int main(void)
   MX_ICACHE_Init();
   MX_UART5_Init();
   MX_USART1_UART_Init();
+  MX_USART2_UART_Init();
   /* USER CODE BEGIN 2 */
 
   /* PB2 queda apagado hasta que UART5 acepte el primer envio del control. */
@@ -1551,6 +1638,85 @@ void SystemClock_Config(void)
 }
 
 /* USER CODE BEGIN 4 */
+
+/*
+ * Recibe un byte de telemetria desde el bote por UART5.
+ *
+ * Solo acepta lineas que comiencen con '$' y terminen con '\n'. La trama se
+ * copia a una cola corta para que el CRC y los campos se revisen en el ciclo
+ * principal. Nunca se decodifica ni se transmite a Nextion dentro de la IRQ.
+ */
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+{
+    uint16_t longitud;
+    uint8_t indice;
+
+    if ((huart == NULL) || (huart->Instance != UART5))
+    {
+        return;
+    }
+
+    diag_rx5_bytes++;
+
+    if (uart5_rx_byte == (uint8_t)'$')
+    {
+        uart5_rx_longitud = 0U;
+        uart5_rx_recibiendo_trama = 1U;
+    }
+
+    if (uart5_rx_recibiendo_trama != 0U)
+    {
+        longitud = uart5_rx_longitud;
+
+        if (longitud < (USV_TRAMA_MAXIMA - 1U))
+        {
+            uart5_rx_construccion[longitud] = (char)uart5_rx_byte;
+            longitud++;
+            uart5_rx_longitud = longitud;
+
+            if (uart5_rx_byte == (uint8_t)'\n')
+            {
+                diag_rx5_lineas++;
+                uart5_rx_construccion[longitud] = '\0';
+
+                if (uart5_rx_cola_cantidad < USV_RX_COLA_TAMANO)
+                {
+                    indice = uart5_rx_cola_entrada;
+                    memcpy(
+                        uart5_rx_cola[indice],
+                        uart5_rx_construccion,
+                        longitud + 1U);
+
+                    uart5_rx_cola_longitud[indice] = longitud;
+                    uart5_rx_cola_entrada =
+                        (uint8_t)((indice + 1U) % USV_RX_COLA_TAMANO);
+                    uart5_rx_cola_cantidad++;
+                }
+                else
+                {
+                    /* Cola llena: descarta esta linea y conserva las anteriores. */
+                    desbordamientos_uart5++;
+                }
+
+                uart5_rx_longitud = 0U;
+                uart5_rx_recibiendo_trama = 0U;
+            }
+        }
+        else
+        {
+            /* Linea demasiado larga: se descarta hasta encontrar otro '$'. */
+            uart5_rx_longitud = 0U;
+            uart5_rx_recibiendo_trama = 0U;
+            desbordamientos_uart5++;
+        }
+    }
+
+    /* Rearme no bloqueante para el siguiente byte. */
+    if (HAL_UART_Receive_IT(USV_UART_TRAMA, &uart5_rx_byte, 1U) != HAL_OK)
+    {
+        errores_uart5++;
+    }
+}
 
 /*
  * Callback ejecutado cuando una entrada EXTI detecta

@@ -5,8 +5,8 @@
  *
  * Esta librería administra:
  *
- * - USART1 para la comunicación con el XBee.
- * - UART5 para la comunicación con la pantalla Nextion.
+ * - UART5 para la comunicación con el bote mediante el radio.
+ * - USART1 para la comunicación con la pantalla Nextion.
  * - Recepción continua mediante DMA circular.
  * - Detección de pausas mediante el evento IDLE.
  * - Almacenamiento de los bytes recibidos en un búfer circular.
@@ -66,8 +66,8 @@ typedef struct
     /* Dirección del manejador HAL de la UART.
      *
      * Para el proyecto:
-     * - &huart1 corresponde al XBee.
-     * - &huart5 corresponde a la pantalla Nextion.
+     * - &huart5 corresponde a la trama del bote.
+     * - &huart1 corresponde a la pantalla Nextion.
      */
     UART_HandleTypeDef *huart;
 
@@ -108,7 +108,7 @@ typedef struct
 
     /* Búfer temporal utilizado para formar una línea completa.
      *
-     * Las tramas del XBee terminan en "\r\n". Los bytes se
+     * Las tramas recibidas desde el bote terminan en "\r\n". Los bytes se
      * acumulan aquí hasta encontrar el carácter '\n'.
      */
     char linea[UART_DMA_LINE_BUFFER_SIZE];
@@ -185,18 +185,18 @@ typedef struct
 
 /* Contexto correspondiente a USART1.
  *
- * USART1 se utilizará para:
- * - Enviar la trama de comandos al XBee.
- * - Recibir la telemetría proveniente del bote.
+ * USART1 se utiliza para:
+ * - Enviar información a la pantalla Nextion.
+ * - Recibir sus eventos táctiles o respuestas.
  */
 static UART_DMA_Contexto contexto_usart1;
 
 
 /* Contexto correspondiente a UART5.
  *
- * UART5 se utilizará para:
- * - Enviar datos a la pantalla Nextion.
- * - Recibir eventos táctiles o respuestas de la pantalla.
+ * UART5 se utiliza para:
+ * - Enviar la trama de comandos hacia el bote.
+ * - Recibir la telemetría $PUSVD proveniente del bote.
  */
 static UART_DMA_Contexto contexto_uart5;
 
@@ -551,52 +551,87 @@ HAL_StatusTypeDef UART_DMA_Iniciar(void)
         return HAL_BUSY;
     }
 
-    /* CubeMX debe enlazar ambos canales de recepcion antes de empezar. */
-    if ((huart1.Instance != USART1) ||
-        (huart5.Instance != UART5) ||
-        (huart1.hdmarx == NULL) ||
-        (huart5.hdmarx == NULL))
+    /*
+     * UART5 TX es el unico recurso indispensable para enviar comandos.
+     * La ausencia o falla de una recepcion DMA no debe bloquear la trama.
+     */
+    if ((huart5.Instance != UART5) ||
+        (huart5.hdmatx == NULL))
     {
         return HAL_ERROR;
     }
 
-    if ((huart1.RxState != HAL_UART_STATE_READY) ||
-        (huart5.RxState != HAL_UART_STATE_READY))
-    {
-        return HAL_BUSY;
-    }
-
-    /* Prepara el contexto utilizado por el XBee. */
+    /* Prepara USART1, utilizado actualmente por la pantalla Nextion. */
     UART_DMA_LimpiarContexto(
         &contexto_usart1,
         &huart1);
 
-    /* Prepara el contexto utilizado por Nextion. */
+    /* Prepara UART5, utilizado actualmente por la trama del bote. */
     UART_DMA_LimpiarContexto(
         &contexto_uart5,
         &huart5);
 
-    /* Aunque una UART falle, Procesar podra reintentar su recepcion. */
+    /*
+     * Desde este punto las transmisiones ya pueden utilizar sus contextos.
+     * Aunque una recepcion falle, Procesar podra intentar recuperarla.
+     */
     inicializacion_realizada = 1U;
 
-    /* Inicia la recepción circular de USART1. */
-    estado_usart1 =
-        UART_DMA_IniciarRecepcion(&contexto_usart1);
-
-    /* Inicia la recepción circular de UART5. */
-    estado_uart5 =
-        UART_DMA_IniciarRecepcion(&contexto_uart5);
-
-    /* Se informa primero cualquier problema encontrado
-     * en la comunicación principal con el XBee.
-     */
-    if (estado_usart1 != HAL_OK)
+    /* Inicia la recepcion circular de USART1 cuando este disponible. */
+    if ((huart1.Instance == USART1) &&
+        (huart1.hdmarx != NULL) &&
+        (huart1.RxState == HAL_UART_STATE_READY))
     {
-        return estado_usart1;
+        estado_usart1 =
+            UART_DMA_IniciarRecepcion(&contexto_usart1);
+    }
+    else
+    {
+        estado_usart1 = HAL_ERROR;
+
+        if ((huart1.Instance == USART1) &&
+            (huart1.hdmarx != NULL))
+        {
+            contexto_usart1.reiniciar_recepcion = 1U;
+        }
     }
 
-    /* Retorna el resultado obtenido al iniciar UART5. */
-    return estado_uart5;
+    /* Inicia la recepcion circular de UART5 cuando este disponible. */
+    if ((huart5.hdmarx != NULL) &&
+        (huart5.RxState == HAL_UART_STATE_READY))
+    {
+        estado_uart5 =
+            UART_DMA_IniciarRecepcion(&contexto_uart5);
+    }
+    else
+    {
+        estado_uart5 = HAL_ERROR;
+
+        if (huart5.hdmarx != NULL)
+        {
+            contexto_uart5.reiniciar_recepcion = 1U;
+        }
+    }
+
+    /* Conserva las solicitudes de recuperacion sin detener UART5 TX. */
+    if ((estado_usart1 != HAL_OK) &&
+        (huart1.Instance == USART1) &&
+        (huart1.hdmarx != NULL))
+    {
+        contexto_usart1.reiniciar_recepcion = 1U;
+    }
+
+    if ((estado_uart5 != HAL_OK) &&
+        (huart5.hdmarx != NULL))
+    {
+        contexto_uart5.reiniciar_recepcion = 1U;
+    }
+
+    /*
+     * HAL_OK significa que el camino de transmision UART5 quedo preparado.
+     * No significa que hayan llegado bytes desde el bote o desde Nextion.
+     */
+    return HAL_OK;
 }
 
 

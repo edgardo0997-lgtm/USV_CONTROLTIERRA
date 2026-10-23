@@ -54,6 +54,10 @@ static const uint8_t nextion_fin_comando[3] =
     0xFF
 };
 
+/* Colores RGB565 utilizados por la interfaz HMI. */
+#define NEXTION_COLOR_ROJO             63488U
+#define NEXTION_COLOR_VERDE             2016U
+#define NEXTION_COLOR_GRIS             33840U
 
 /*
  * Verifica si la parte de transmisión de la UART se encuentra libre.
@@ -113,15 +117,10 @@ HAL_StatusTypeDef NEXTION_Init(UART_HandleTypeDef *huart)
         return HAL_ERROR;
     }
 
-    /* CubeMX debe haber enlazado un canal DMA de transmision a la UART. */
-    if (huart->hdmatx == NULL)
-    {
-        return HAL_ERROR;
-    }
-
     /*
-     * No es necesario reinicializar UART5 aquí porque
-     * CubeMX ejecuta MX_UART5_Init() desde main.c.
+     * No es necesario reinicializar USART1 aqui porque CubeMX ya ejecuto
+     * MX_USART1_UART_Init(). La actualizacion completa usa interrupciones
+     * y no depende de que exista un canal DMA para la pantalla.
      */
     return HAL_OK;
 }
@@ -227,6 +226,174 @@ static uint8_t NEXTION_AgregarComando(
     *utilizados += sizeof(nextion_fin_comando);
 
     return 1U;
+}
+
+
+/*
+ * Agrega texto a un objeto y reemplaza caracteres que podrian cerrar
+ * prematuramente una cadena de comandos Nextion.
+ */
+static uint8_t NEXTION_AgregarTextoSeguro(
+    uint8_t *buffer,
+    size_t tamano_buffer,
+    size_t *utilizados,
+    const char *objeto,
+    const char *texto)
+{
+    char texto_seguro[NEXTION_COMANDO_MAXIMO];
+    size_t origen;
+    size_t destino = 0U;
+
+    if ((objeto == NULL) || (texto == NULL))
+    {
+        return 0U;
+    }
+
+    for (origen = 0U; texto[origen] != '\0'; origen++)
+    {
+        if ((destino + 1U) >= sizeof(texto_seguro))
+        {
+            return 0U;
+        }
+
+        if ((texto[origen] == '"') ||
+            (texto[origen] == '\\') ||
+            ((uint8_t)texto[origen] < 0x20U))
+        {
+            texto_seguro[destino] = '?';
+        }
+        else
+        {
+            texto_seguro[destino] = texto[origen];
+        }
+
+        destino++;
+    }
+
+    texto_seguro[destino] = '\0';
+
+    return NEXTION_AgregarComando(
+        buffer,
+        tamano_buffer,
+        utilizados,
+        "%s.txt=\"%s\"",
+        objeto,
+        texto_seguro);
+}
+
+
+/* Agrega un valor x10 con una cifra decimal y su unidad. */
+static uint8_t NEXTION_AgregarDecimalX10(
+    uint8_t *buffer,
+    size_t tamano_buffer,
+    size_t *utilizados,
+    const char *objeto,
+    int32_t valor_x10,
+    const char *unidad)
+{
+    char texto[48];
+    uint32_t magnitud;
+    const char *signo;
+    int resultado;
+
+    if ((objeto == NULL) || (unidad == NULL))
+    {
+        return 0U;
+    }
+
+    if (valor_x10 < 0)
+    {
+        signo = "-";
+        /* Tambien funciona para INT32_MIN sin usar operaciones de 64 bits. */
+        magnitud = (uint32_t)(-(valor_x10 + 1)) + 1U;
+    }
+    else
+    {
+        signo = "";
+        magnitud = (uint32_t)valor_x10;
+    }
+
+    resultado = snprintf(
+        texto,
+        sizeof(texto),
+        "%s%lu.%01lu%s",
+        signo,
+        (unsigned long)(magnitud / 10U),
+        (unsigned long)(magnitud % 10U),
+        unidad);
+
+    if ((resultado < 0) || ((size_t)resultado >= sizeof(texto)))
+    {
+        return 0U;
+    }
+
+    return NEXTION_AgregarTextoSeguro(
+        buffer,
+        tamano_buffer,
+        utilizados,
+        objeto,
+        texto);
+}
+
+
+/* Reproduce para la pantalla el signo que utiliza la trama $PUSVU. */
+static int16_t NEXTION_PotenciaConSigno(
+    uint16_t potencia,
+    uint8_t avante,
+    uint8_t atras,
+    uint8_t parada,
+    uint8_t falla)
+{
+    if ((parada != 0U) || (falla != 0U))
+    {
+        return 0;
+    }
+
+    if ((avante != 0U) && (atras == 0U))
+    {
+        return (int16_t)potencia;
+    }
+
+    if ((avante == 0U) && (atras != 0U))
+    {
+        return -(int16_t)potencia;
+    }
+
+    return 0;
+}
+
+
+/* Convierte hhmmss.ss a hh:mm:ss para el objeto tHora. */
+static uint8_t NEXTION_FormatearUTC(
+    const char *utc,
+    char *destino,
+    size_t capacidad)
+{
+    size_t indice;
+    int resultado;
+
+    if ((utc == NULL) || (destino == NULL) || (capacidad == 0U))
+    {
+        return 0U;
+    }
+
+    for (indice = 0U; indice < 6U; indice++)
+    {
+        if ((utc[indice] < '0') || (utc[indice] > '9'))
+        {
+            return 0U;
+        }
+    }
+
+    resultado = snprintf(
+        destino,
+        capacidad,
+        "%c%c:%c%c:%c%c",
+        utc[0], utc[1],
+        utc[2], utc[3],
+        utc[4], utc[5]);
+
+    return ((resultado == 8) && ((size_t)resultado < capacidad)) ? 1U : 0U;
 }
 
 
@@ -639,4 +806,828 @@ HAL_StatusTypeDef NEXTION_EnviarTrama(
         huart,
         nextion_buffer_tx,
         (uint16_t)utilizados);
+}
+
+
+/*
+ * Actualiza los objetos reales del proyecto HMI recibido.
+ *
+ * page0:
+ * - bateria, corriente, temperatura, inundacion, GPS, velocidad y rumbo;
+ * - potencias de babor/estribor, camara, bomba y parada.
+ *
+ * pageIMU:
+ * - yaw, pitch, roll y estado de inclinacion.
+ *
+ * Los comandos de ambas paginas se agrupan en una sola transferencia DMA.
+ */
+/*
+ * Envia el estado completo repartido en cuatro bloques pequenos.
+ * Cada llamada transmite un bloque diferente mediante DMA y luego avanza
+ * al siguiente. La funcion solamente inicia el envio y regresa enseguida:
+ * una pantalla desconectada, ocupada o con error no detiene el ciclo que
+ * transmite la trama de control al bote por UART5.
+ */
+static HAL_StatusTypeDef NEXTION_EnviarEstadoUSVPorBloques(
+    UART_HandleTypeDef *huart,
+    const USV_Telemetria *telemetria,
+    uint8_t telemetria_valida,
+    const USV_Comando *comando,
+    float voltaje_control)
+{
+    static uint8_t bloque = 0U;
+    size_t utilizados = 0U;
+    int16_t motor_babor;
+    int16_t motor_estribor;
+    uint16_t magnitud_babor;
+    uint16_t magnitud_estribor;
+    uint16_t color_parada;
+    uint16_t color_bomba_on;
+    uint16_t color_bomba_off;
+    const char *texto_parada;
+    char texto[64];
+    int resultado;
+
+    if ((huart == NULL) ||
+        (telemetria == NULL) ||
+        (comando == NULL) ||
+        !isfinite(voltaje_control))
+    {
+        return HAL_ERROR;
+    }
+
+    /*
+     * Si USART1 aun transmite el bloque anterior, retorna inmediatamente.
+     * No espera, no aborta y no afecta la UART5 utilizada por el bote.
+     */
+    if (huart->gState != HAL_UART_STATE_READY)
+    {
+        return HAL_BUSY;
+    }
+
+    motor_babor = NEXTION_PotenciaConSigno(
+        comando->potencia_babor,
+        comando->babor_avante,
+        comando->babor_atras,
+        comando->parada,
+        comando->falla_direccion);
+
+    motor_estribor = NEXTION_PotenciaConSigno(
+        comando->potencia_estribor,
+        comando->estribor_avante,
+        comando->estribor_atras,
+        comando->parada,
+        comando->falla_direccion);
+
+    magnitud_babor =
+        (uint16_t)((motor_babor < 0) ? -motor_babor : motor_babor);
+    magnitud_estribor =
+        (uint16_t)((motor_estribor < 0) ? -motor_estribor : motor_estribor);
+
+    if (comando->parada != 0U)
+    {
+        texto_parada = "EMERGENCIA";
+        color_parada = NEXTION_COLOR_ROJO;
+    }
+    else
+    {
+        texto_parada = "NORMAL";
+        color_parada = NEXTION_COLOR_VERDE;
+    }
+
+    if (comando->bomba != 0U)
+    {
+        color_bomba_on = NEXTION_COLOR_VERDE;
+        color_bomba_off = NEXTION_COLOR_GRIS;
+    }
+    else
+    {
+        color_bomba_on = NEXTION_COLOR_GRIS;
+        color_bomba_off = NEXTION_COLOR_ROJO;
+    }
+
+    switch (bloque)
+    {
+        case 0U:
+        {
+            int32_t angulo_aguja = (int32_t)comando->camara + 90;
+
+            if (angulo_aguja < 0)
+            {
+                angulo_aguja = 0;
+            }
+            else if (angulo_aguja > 180)
+            {
+                angulo_aguja = 180;
+            }
+
+            if ((NEXTION_AgregarComando(
+                    nextion_buffer_tx, sizeof(nextion_buffer_tx), &utilizados,
+                    "tNumAngulo.txt=\"%d\"", (int)comando->camara) == 0U) ||
+                (NEXTION_AgregarComando(
+                    nextion_buffer_tx, sizeof(nextion_buffer_tx), &utilizados,
+                    "zAngulo.val=%ld", (long)angulo_aguja) == 0U) ||
+                (NEXTION_AgregarTextoSeguro(
+                    nextion_buffer_tx, sizeof(nextion_buffer_tx), &utilizados,
+                    "tParada", texto_parada) == 0U) ||
+                (NEXTION_AgregarComando(
+                    nextion_buffer_tx, sizeof(nextion_buffer_tx), &utilizados,
+                    "tParada.bco=%u", (unsigned int)color_parada) == 0U) ||
+                (NEXTION_AgregarComando(
+                    nextion_buffer_tx, sizeof(nextion_buffer_tx), &utilizados,
+                    "tBabor.txt=\"%d %%\"", (int)motor_babor) == 0U) ||
+                (NEXTION_AgregarComando(
+                    nextion_buffer_tx, sizeof(nextion_buffer_tx), &utilizados,
+                    "jBABOR.val=%u", (unsigned int)magnitud_babor) == 0U) ||
+                (NEXTION_AgregarComando(
+                    nextion_buffer_tx, sizeof(nextion_buffer_tx), &utilizados,
+                    "tEstribor.txt=\"%d %%\"", (int)motor_estribor) == 0U) ||
+                (NEXTION_AgregarComando(
+                    nextion_buffer_tx, sizeof(nextion_buffer_tx), &utilizados,
+                    "jEstribor.val=%u", (unsigned int)magnitud_estribor) == 0U) ||
+                (NEXTION_AgregarComando(
+                    nextion_buffer_tx, sizeof(nextion_buffer_tx), &utilizados,
+                    "tBomba2.bco=%u", (unsigned int)color_bomba_on) == 0U) ||
+                (NEXTION_AgregarComando(
+                    nextion_buffer_tx, sizeof(nextion_buffer_tx), &utilizados,
+                    "tBomba1.bco=%u", (unsigned int)color_bomba_off) == 0U))
+            {
+                return HAL_ERROR;
+            }
+            break;
+        }
+
+        case 1U:
+        {
+            int32_t bateria_x10;
+            int32_t corriente_x10;
+            int32_t temperatura_x10;
+            uint32_t barra_bateria;
+            uint32_t barra_corriente;
+            uint32_t barra_temperatura;
+            const char *estado_agua;
+            uint32_t barra_agua;
+
+            if (telemetria_valida != 0U)
+            {
+                bateria_x10 = (int32_t)telemetria->voltaje_x10;
+                corriente_x10 = (int32_t)telemetria->corriente_x10;
+                temperatura_x10 = (int32_t)telemetria->temperatura_x10;
+                estado_agua =
+                    (telemetria->inundacion != 0U) ? "AGUA" : "SECO";
+                barra_agua =
+                    (telemetria->inundacion != 0U) ? 100U : 0U;
+            }
+            else
+            {
+                if (voltaje_control < 0.0f)
+                {
+                    voltaje_control = 0.0f;
+                }
+                else if (voltaje_control > 14.0f)
+                {
+                    voltaje_control = 14.0f;
+                }
+
+                bateria_x10 =
+                    (int32_t)((voltaje_control * 10.0f) + 0.5f);
+                corriente_x10 = 0;
+                temperatura_x10 = 0;
+                estado_agua = "SIN DATOS";
+                barra_agua = 0U;
+            }
+
+            barra_bateria =
+                ((uint32_t)bateria_x10 * 100U + 70U) / 140U;
+            barra_corriente =
+                ((uint32_t)corriente_x10 * 100U + 500U) / 1000U;
+
+            if (temperatura_x10 < -100)
+            {
+                barra_temperatura = 0U;
+            }
+            else
+            {
+                barra_temperatura =
+                    ((uint32_t)(temperatura_x10 + 100) * 100U + 475U) /
+                    950U;
+            }
+
+            if ((NEXTION_AgregarDecimalX10(
+                    nextion_buffer_tx, sizeof(nextion_buffer_tx), &utilizados,
+                    "tBateria", bateria_x10, " V") == 0U) ||
+                (NEXTION_AgregarComando(
+                    nextion_buffer_tx, sizeof(nextion_buffer_tx), &utilizados,
+                    "jbat.val=%lu", (unsigned long)barra_bateria) == 0U) ||
+                (NEXTION_AgregarDecimalX10(
+                    nextion_buffer_tx, sizeof(nextion_buffer_tx), &utilizados,
+                    "tCorr", corriente_x10, " A") == 0U) ||
+                (NEXTION_AgregarComando(
+                    nextion_buffer_tx, sizeof(nextion_buffer_tx), &utilizados,
+                    "jCorr.val=%lu", (unsigned long)barra_corriente) == 0U) ||
+                (NEXTION_AgregarDecimalX10(
+                    nextion_buffer_tx, sizeof(nextion_buffer_tx), &utilizados,
+                    "tTemperatura", temperatura_x10, " C") == 0U) ||
+                (NEXTION_AgregarComando(
+                    nextion_buffer_tx, sizeof(nextion_buffer_tx), &utilizados,
+                    "barTemp.val=%lu", (unsigned long)barra_temperatura) == 0U) ||
+                (NEXTION_AgregarTextoSeguro(
+                    nextion_buffer_tx, sizeof(nextion_buffer_tx), &utilizados,
+                    "tHumedad", estado_agua) == 0U) ||
+                (NEXTION_AgregarComando(
+                    nextion_buffer_tx, sizeof(nextion_buffer_tx), &utilizados,
+                    "jHumedad.val=%lu", (unsigned long)barra_agua) == 0U))
+            {
+                return HAL_ERROR;
+            }
+            break;
+        }
+
+        case 2U:
+        {
+            if (telemetria_valida == 0U)
+            {
+                if ((NEXTION_AgregarTextoSeguro(
+                        nextion_buffer_tx, sizeof(nextion_buffer_tx), &utilizados,
+                        "gps_satelites", "SAT 0") == 0U) ||
+                    (NEXTION_AgregarTextoSeguro(
+                        nextion_buffer_tx, sizeof(nextion_buffer_tx), &utilizados,
+                        "lblGPS", "SIN DATOS") == 0U) ||
+                    (NEXTION_AgregarTextoSeguro(
+                        nextion_buffer_tx, sizeof(nextion_buffer_tx), &utilizados,
+                        "tLatitud", "---") == 0U) ||
+                    (NEXTION_AgregarTextoSeguro(
+                        nextion_buffer_tx, sizeof(nextion_buffer_tx), &utilizados,
+                        "tLongitud", "---") == 0U) ||
+                    (NEXTION_AgregarTextoSeguro(
+                        nextion_buffer_tx, sizeof(nextion_buffer_tx), &utilizados,
+                        "tvel", "--.- km/h") == 0U) ||
+                    (NEXTION_AgregarComando(
+                        nextion_buffer_tx, sizeof(nextion_buffer_tx), &utilizados,
+                        "barVEL.val=0") == 0U) ||
+                    (NEXTION_AgregarTextoSeguro(
+                        nextion_buffer_tx, sizeof(nextion_buffer_tx), &utilizados,
+                        "tRumbo", "---") == 0U) ||
+                    (NEXTION_AgregarComando(
+                        nextion_buffer_tx, sizeof(nextion_buffer_tx), &utilizados,
+                        "zRumbo.val=0") == 0U) ||
+                    (NEXTION_AgregarTextoSeguro(
+                        nextion_buffer_tx, sizeof(nextion_buffer_tx), &utilizados,
+                        "page0.tHora", "--:--:--") == 0U))
+                {
+                    return HAL_ERROR;
+                }
+            }
+            else
+            {
+                uint32_t barra_velocidad;
+                uint32_t velocidad_kmh_x10;
+                uint32_t rumbo_entero;
+                const char *estado_gps;
+
+                barra_velocidad =
+                    ((uint32_t)telemetria->velocidad_x10 * 100U + 150U) /
+                    300U;
+                velocidad_kmh_x10 =
+                    ((uint32_t)telemetria->velocidad_x10 * 1852U + 500U) /
+                    1000U;
+                rumbo_entero = (uint32_t)telemetria->rumbo_x10 / 10U;
+                estado_gps =
+                    (telemetria->calidad_gps != 0U) ? "GPS OK" : "SIN FIX";
+
+                resultado = snprintf(
+                    texto, sizeof(texto), "SAT %u",
+                    (unsigned int)telemetria->satelites);
+                if ((resultado < 0) || ((size_t)resultado >= sizeof(texto)) ||
+                    (NEXTION_AgregarTextoSeguro(
+                        nextion_buffer_tx, sizeof(nextion_buffer_tx), &utilizados,
+                        "gps_satelites", texto) == 0U) ||
+                    (NEXTION_AgregarTextoSeguro(
+                        nextion_buffer_tx, sizeof(nextion_buffer_tx), &utilizados,
+                        "lblGPS", estado_gps) == 0U))
+                {
+                    return HAL_ERROR;
+                }
+
+                resultado = snprintf(
+                    texto, sizeof(texto), "%s %c",
+                    telemetria->latitud, telemetria->hemisferio_latitud);
+                if ((resultado < 0) || ((size_t)resultado >= sizeof(texto)) ||
+                    (NEXTION_AgregarTextoSeguro(
+                        nextion_buffer_tx, sizeof(nextion_buffer_tx), &utilizados,
+                        "tLatitud", texto) == 0U))
+                {
+                    return HAL_ERROR;
+                }
+
+                resultado = snprintf(
+                    texto, sizeof(texto), "%s %c",
+                    telemetria->longitud, telemetria->hemisferio_longitud);
+                if ((resultado < 0) || ((size_t)resultado >= sizeof(texto)) ||
+                    (NEXTION_AgregarTextoSeguro(
+                        nextion_buffer_tx, sizeof(nextion_buffer_tx), &utilizados,
+                        "tLongitud", texto) == 0U) ||
+                    (NEXTION_AgregarDecimalX10(
+                        nextion_buffer_tx, sizeof(nextion_buffer_tx), &utilizados,
+                        "tvel", (int32_t)velocidad_kmh_x10, " km/h") == 0U) ||
+                    (NEXTION_AgregarComando(
+                        nextion_buffer_tx, sizeof(nextion_buffer_tx), &utilizados,
+                        "barVEL.val=%lu", (unsigned long)barra_velocidad) == 0U))
+                {
+                    return HAL_ERROR;
+                }
+
+                resultado = snprintf(
+                    texto, sizeof(texto), "%03lu", (unsigned long)rumbo_entero);
+                if ((resultado < 0) || ((size_t)resultado >= sizeof(texto)) ||
+                    (NEXTION_AgregarTextoSeguro(
+                        nextion_buffer_tx, sizeof(nextion_buffer_tx), &utilizados,
+                        "tRumbo", texto) == 0U) ||
+                    (NEXTION_AgregarComando(
+                        nextion_buffer_tx, sizeof(nextion_buffer_tx), &utilizados,
+                        "zRumbo.val=%lu", (unsigned long)rumbo_entero) == 0U))
+                {
+                    return HAL_ERROR;
+                }
+
+                if (NEXTION_FormatearUTC(
+                        telemetria->utc, texto, sizeof(texto)) == 0U)
+                {
+                    strcpy(texto, "--:--:--");
+                }
+
+                if (NEXTION_AgregarTextoSeguro(
+                        nextion_buffer_tx, sizeof(nextion_buffer_tx), &utilizados,
+                        "page0.tHora", texto) == 0U)
+                {
+                    return HAL_ERROR;
+                }
+            }
+            break;
+        }
+
+        default:
+        {
+            if (telemetria_valida == 0U)
+            {
+                if ((NEXTION_AgregarTextoSeguro(
+                        nextion_buffer_tx, sizeof(nextion_buffer_tx), &utilizados,
+                        "tYaw", "--.-") == 0U) ||
+                    (NEXTION_AgregarComando(
+                        nextion_buffer_tx, sizeof(nextion_buffer_tx), &utilizados,
+                        "zYaw.val=0") == 0U) ||
+                    (NEXTION_AgregarTextoSeguro(
+                        nextion_buffer_tx, sizeof(nextion_buffer_tx), &utilizados,
+                        "tPitch", "--.-") == 0U) ||
+                    (NEXTION_AgregarTextoSeguro(
+                        nextion_buffer_tx, sizeof(nextion_buffer_tx), &utilizados,
+                        "tRoll", "--.-") == 0U) ||
+                    (NEXTION_AgregarTextoSeguro(
+                        nextion_buffer_tx, sizeof(nextion_buffer_tx), &utilizados,
+                        "tInclinacion", "SIN DATOS") == 0U))
+                {
+                    return HAL_ERROR;
+                }
+            }
+            else
+            {
+                uint32_t yaw_entero = (uint32_t)telemetria->yaw_x10 / 10U;
+                const char *estado_inclinacion;
+
+                if (((telemetria->pitch_x10 >= -30) &&
+                     (telemetria->pitch_x10 <= 30)) &&
+                    ((telemetria->roll_x10 >= -30) &&
+                     (telemetria->roll_x10 <= 30)))
+                {
+                    estado_inclinacion = "NIVEL";
+                }
+                else
+                {
+                    estado_inclinacion = "INCLINADO";
+                }
+
+                if ((NEXTION_AgregarDecimalX10(
+                        nextion_buffer_tx, sizeof(nextion_buffer_tx), &utilizados,
+                        "tYaw", telemetria->yaw_x10, "") == 0U) ||
+                    (NEXTION_AgregarComando(
+                        nextion_buffer_tx, sizeof(nextion_buffer_tx), &utilizados,
+                        "zYaw.val=%lu", (unsigned long)yaw_entero) == 0U) ||
+                    (NEXTION_AgregarDecimalX10(
+                        nextion_buffer_tx, sizeof(nextion_buffer_tx), &utilizados,
+                        "tPitch", telemetria->pitch_x10, "") == 0U) ||
+                    (NEXTION_AgregarDecimalX10(
+                        nextion_buffer_tx, sizeof(nextion_buffer_tx), &utilizados,
+                        "tRoll", telemetria->roll_x10, "") == 0U) ||
+                    (NEXTION_AgregarTextoSeguro(
+                        nextion_buffer_tx, sizeof(nextion_buffer_tx), &utilizados,
+                        "tInclinacion", estado_inclinacion) == 0U))
+                {
+                    return HAL_ERROR;
+                }
+            }
+            break;
+        }
+    }
+
+    /* Avanza aunque este bloque falle: un dato de pantalla nunca detiene USV. */
+    bloque = (uint8_t)((bloque + 1U) % 4U);
+
+    if ((utilizados == 0U) || (utilizados > UINT16_MAX))
+    {
+        return HAL_ERROR;
+    }
+
+    /* Arranca por interrupcion y retorna de inmediato al ciclo principal. */
+    nextion_uart_tx = huart;
+
+    return HAL_UART_Transmit_IT(
+        huart,
+        nextion_buffer_tx,
+        (uint16_t)utilizados);
+}
+
+
+HAL_StatusTypeDef NEXTION_EnviarEstadoUSV(
+    UART_HandleTypeDef *huart,
+    const USV_Telemetria *telemetria,
+    uint8_t telemetria_valida,
+    const USV_Comando *comando,
+    float voltaje_control)
+{
+#if 1
+    return NEXTION_EnviarEstadoUSVPorBloques(
+        huart,
+        telemetria,
+        telemetria_valida,
+        comando,
+        voltaje_control);
+#else
+    size_t utilizados = 0U;
+    int16_t motor_babor;
+    int16_t motor_estribor;
+    uint16_t magnitud_babor;
+    uint16_t magnitud_estribor;
+    int32_t angulo_aguja;
+    uint16_t color_parada;
+    uint16_t color_bomba_on;
+    uint16_t color_bomba_off;
+    const char *texto_parada;
+    char texto[64];
+    int resultado;
+
+    if ((huart == NULL) ||
+        (telemetria == NULL) ||
+        (comando == NULL) ||
+        !isfinite(voltaje_control))
+    {
+        return HAL_ERROR;
+    }
+
+    /*
+     * Esta funcion no comparte una transferencia DMA pendiente. Si USART1
+     * esta ocupada, se omite esta actualizacion sin afectar UART5.
+     */
+    if (huart->gState != HAL_UART_STATE_READY)
+    {
+        return HAL_BUSY;
+    }
+
+    motor_babor = NEXTION_PotenciaConSigno(
+        comando->potencia_babor,
+        comando->babor_avante,
+        comando->babor_atras,
+        comando->parada,
+        comando->falla_direccion);
+
+    motor_estribor = NEXTION_PotenciaConSigno(
+        comando->potencia_estribor,
+        comando->estribor_avante,
+        comando->estribor_atras,
+        comando->parada,
+        comando->falla_direccion);
+
+    magnitud_babor = (uint16_t)((motor_babor < 0) ? -motor_babor : motor_babor);
+    magnitud_estribor =
+        (uint16_t)((motor_estribor < 0) ? -motor_estribor : motor_estribor);
+
+    angulo_aguja = (int32_t)comando->camara + 90;
+    if (angulo_aguja < 0)
+    {
+        angulo_aguja = 0;
+    }
+    else if (angulo_aguja > 180)
+    {
+        angulo_aguja = 180;
+    }
+
+    if (comando->parada != 0U)
+    {
+        texto_parada = "EMERGENCIA";
+        color_parada = NEXTION_COLOR_ROJO;
+    }
+    else
+    {
+        texto_parada = "NORMAL";
+        color_parada = NEXTION_COLOR_VERDE;
+    }
+
+    if (comando->bomba != 0U)
+    {
+        color_bomba_on = NEXTION_COLOR_VERDE;
+        color_bomba_off = NEXTION_COLOR_GRIS;
+    }
+    else
+    {
+        color_bomba_on = NEXTION_COLOR_GRIS;
+        color_bomba_off = NEXTION_COLOR_ROJO;
+    }
+
+    /* Controles locales: se muestran incluso sin telemetria del bote. */
+    if ((NEXTION_AgregarComando(
+            nextion_buffer_tx, sizeof(nextion_buffer_tx), &utilizados,
+            "tNumAngulo.txt=\"%d\"", (int)comando->camara) == 0U) ||
+        (NEXTION_AgregarComando(
+            nextion_buffer_tx, sizeof(nextion_buffer_tx), &utilizados,
+            "zAngulo.val=%ld", (long)angulo_aguja) == 0U) ||
+        (NEXTION_AgregarTextoSeguro(
+            nextion_buffer_tx, sizeof(nextion_buffer_tx), &utilizados,
+            "tParada", texto_parada) == 0U) ||
+        (NEXTION_AgregarComando(
+            nextion_buffer_tx, sizeof(nextion_buffer_tx), &utilizados,
+            "tParada.bco=%u", (unsigned int)color_parada) == 0U) ||
+        (NEXTION_AgregarComando(
+            nextion_buffer_tx, sizeof(nextion_buffer_tx), &utilizados,
+            "tBabor.txt=\"%d %%\"", (int)motor_babor) == 0U) ||
+        (NEXTION_AgregarComando(
+            nextion_buffer_tx, sizeof(nextion_buffer_tx), &utilizados,
+            "jBABOR.val=%u", (unsigned int)magnitud_babor) == 0U) ||
+        (NEXTION_AgregarComando(
+            nextion_buffer_tx, sizeof(nextion_buffer_tx), &utilizados,
+            "tEstribor.txt=\"%d %%\"", (int)motor_estribor) == 0U) ||
+        (NEXTION_AgregarComando(
+            nextion_buffer_tx, sizeof(nextion_buffer_tx), &utilizados,
+            "jEstribor.val=%u", (unsigned int)magnitud_estribor) == 0U) ||
+        (NEXTION_AgregarComando(
+            nextion_buffer_tx, sizeof(nextion_buffer_tx), &utilizados,
+            "tBomba2.bco=%u", (unsigned int)color_bomba_on) == 0U) ||
+        (NEXTION_AgregarComando(
+            nextion_buffer_tx, sizeof(nextion_buffer_tx), &utilizados,
+            "tBomba1.bco=%u", (unsigned int)color_bomba_off) == 0U))
+    {
+        return HAL_ERROR;
+    }
+
+    if (telemetria_valida == 0U)
+    {
+        int32_t voltaje_local_x10;
+        uint32_t barra_bateria;
+
+        if (voltaje_control < 0.0f)
+        {
+            voltaje_control = 0.0f;
+        }
+        else if (voltaje_control > 14.0f)
+        {
+            voltaje_control = 14.0f;
+        }
+
+        voltaje_local_x10 = (int32_t)((voltaje_control * 10.0f) + 0.5f);
+        barra_bateria = ((uint32_t)voltaje_local_x10 * 100U + 70U) / 140U;
+
+        if ((NEXTION_AgregarDecimalX10(
+                nextion_buffer_tx, sizeof(nextion_buffer_tx), &utilizados,
+                "tBateria", voltaje_local_x10, " V") == 0U) ||
+            (NEXTION_AgregarComando(
+                nextion_buffer_tx, sizeof(nextion_buffer_tx), &utilizados,
+                "jbat.val=%lu", (unsigned long)barra_bateria) == 0U) ||
+            (NEXTION_AgregarTextoSeguro(
+                nextion_buffer_tx, sizeof(nextion_buffer_tx), &utilizados,
+                "tCorr", "--.- A") == 0U) ||
+            (NEXTION_AgregarComando(
+                nextion_buffer_tx, sizeof(nextion_buffer_tx), &utilizados,
+                "jCorr.val=0") == 0U) ||
+            (NEXTION_AgregarTextoSeguro(
+                nextion_buffer_tx, sizeof(nextion_buffer_tx), &utilizados,
+                "tTemperatura", "--.- C") == 0U) ||
+            (NEXTION_AgregarComando(
+                nextion_buffer_tx, sizeof(nextion_buffer_tx), &utilizados,
+                "barTemp.val=0") == 0U) ||
+            (NEXTION_AgregarTextoSeguro(
+                nextion_buffer_tx, sizeof(nextion_buffer_tx), &utilizados,
+                "tHumedad", "SIN DATOS") == 0U) ||
+            (NEXTION_AgregarComando(
+                nextion_buffer_tx, sizeof(nextion_buffer_tx), &utilizados,
+                "jHumedad.val=0") == 0U) ||
+            (NEXTION_AgregarTextoSeguro(
+                nextion_buffer_tx, sizeof(nextion_buffer_tx), &utilizados,
+                "gps_satelites", "SAT 0") == 0U) ||
+            (NEXTION_AgregarTextoSeguro(
+                nextion_buffer_tx, sizeof(nextion_buffer_tx), &utilizados,
+                "lblGPS", "SIN DATOS") == 0U) ||
+            (NEXTION_AgregarTextoSeguro(
+                nextion_buffer_tx, sizeof(nextion_buffer_tx), &utilizados,
+                "tLatitud", "---") == 0U) ||
+            (NEXTION_AgregarTextoSeguro(
+                nextion_buffer_tx, sizeof(nextion_buffer_tx), &utilizados,
+                "tLongitud", "---") == 0U) ||
+            (NEXTION_AgregarTextoSeguro(
+                nextion_buffer_tx, sizeof(nextion_buffer_tx), &utilizados,
+                "tvel", "--.- km/h") == 0U) ||
+            (NEXTION_AgregarComando(
+                nextion_buffer_tx, sizeof(nextion_buffer_tx), &utilizados,
+                "barVEL.val=0") == 0U) ||
+            (NEXTION_AgregarTextoSeguro(
+                nextion_buffer_tx, sizeof(nextion_buffer_tx), &utilizados,
+                "tRumbo", "---") == 0U) ||
+            (NEXTION_AgregarComando(
+                nextion_buffer_tx, sizeof(nextion_buffer_tx), &utilizados,
+                "zRumbo.val=0") == 0U) ||
+            (NEXTION_AgregarTextoSeguro(
+                nextion_buffer_tx, sizeof(nextion_buffer_tx), &utilizados,
+                "tYaw", "--.-") == 0U) ||
+            (NEXTION_AgregarComando(
+                nextion_buffer_tx, sizeof(nextion_buffer_tx), &utilizados,
+                "zYaw.val=0") == 0U) ||
+            (NEXTION_AgregarTextoSeguro(
+                nextion_buffer_tx, sizeof(nextion_buffer_tx), &utilizados,
+                "tPitch", "--.-") == 0U) ||
+            (NEXTION_AgregarTextoSeguro(
+                nextion_buffer_tx, sizeof(nextion_buffer_tx), &utilizados,
+                "tRoll", "--.-") == 0U) ||
+            (NEXTION_AgregarTextoSeguro(
+                nextion_buffer_tx, sizeof(nextion_buffer_tx), &utilizados,
+                "tInclinacion", "SIN DATOS") == 0U) ||
+            (NEXTION_AgregarTextoSeguro(
+                nextion_buffer_tx, sizeof(nextion_buffer_tx), &utilizados,
+                "page0.tHora", "--:--:--") == 0U))
+        {
+            return HAL_ERROR;
+        }
+    }
+    else
+    {
+        uint32_t barra_bateria;
+        uint32_t barra_corriente;
+        uint32_t barra_temperatura;
+        uint32_t barra_velocidad;
+        uint32_t velocidad_kmh_x10;
+        uint32_t rumbo_entero;
+        uint32_t yaw_entero;
+        const char *estado_gps;
+        const char *estado_inclinacion;
+
+        barra_bateria =
+            ((uint32_t)telemetria->voltaje_x10 * 100U + 70U) / 140U;
+        barra_corriente =
+            ((uint32_t)telemetria->corriente_x10 * 100U + 500U) / 1000U;
+        barra_temperatura =
+            ((uint32_t)((int32_t)telemetria->temperatura_x10 + 100) *
+             100U + 475U) / 950U;
+        barra_velocidad =
+            ((uint32_t)telemetria->velocidad_x10 * 100U + 150U) / 300U;
+
+        /* La telemetria llega en nudos; la interfaz principal muestra km/h. */
+        velocidad_kmh_x10 =
+            ((uint32_t)telemetria->velocidad_x10 * 1852U + 500U) / 1000U;
+
+        rumbo_entero = (uint32_t)telemetria->rumbo_x10 / 10U;
+        yaw_entero = (uint32_t)telemetria->yaw_x10 / 10U;
+        estado_gps =
+            (telemetria->calidad_gps != 0U) ? "GPS OK" : "SIN FIX";
+
+        if (((telemetria->pitch_x10 >= -30) &&
+             (telemetria->pitch_x10 <= 30)) &&
+            ((telemetria->roll_x10 >= -30) &&
+             (telemetria->roll_x10 <= 30)))
+        {
+            estado_inclinacion = "NIVEL";
+        }
+        else
+        {
+            estado_inclinacion = "INCLINADO";
+        }
+
+        if ((NEXTION_AgregarDecimalX10(
+                nextion_buffer_tx, sizeof(nextion_buffer_tx), &utilizados,
+                "tBateria", telemetria->voltaje_x10, " V") == 0U) ||
+            (NEXTION_AgregarComando(
+                nextion_buffer_tx, sizeof(nextion_buffer_tx), &utilizados,
+                "jbat.val=%lu", (unsigned long)barra_bateria) == 0U) ||
+            (NEXTION_AgregarDecimalX10(
+                nextion_buffer_tx, sizeof(nextion_buffer_tx), &utilizados,
+                "tCorr", telemetria->corriente_x10, " A") == 0U) ||
+            (NEXTION_AgregarComando(
+                nextion_buffer_tx, sizeof(nextion_buffer_tx), &utilizados,
+                "jCorr.val=%lu", (unsigned long)barra_corriente) == 0U) ||
+            (NEXTION_AgregarDecimalX10(
+                nextion_buffer_tx, sizeof(nextion_buffer_tx), &utilizados,
+                "tTemperatura", telemetria->temperatura_x10, " C") == 0U) ||
+            (NEXTION_AgregarComando(
+                nextion_buffer_tx, sizeof(nextion_buffer_tx), &utilizados,
+                "barTemp.val=%lu", (unsigned long)barra_temperatura) == 0U) ||
+            (NEXTION_AgregarTextoSeguro(
+                nextion_buffer_tx, sizeof(nextion_buffer_tx), &utilizados,
+                "tHumedad", (telemetria->inundacion != 0U) ? "AGUA" : "SECO") == 0U) ||
+            (NEXTION_AgregarComando(
+                nextion_buffer_tx, sizeof(nextion_buffer_tx), &utilizados,
+                "jHumedad.val=%u",
+                (telemetria->inundacion != 0U) ? 100U : 0U) == 0U))
+        {
+            return HAL_ERROR;
+        }
+
+        resultado = snprintf(
+            texto, sizeof(texto), "SAT %u",
+            (unsigned int)telemetria->satelites);
+        if ((resultado < 0) || ((size_t)resultado >= sizeof(texto)) ||
+            (NEXTION_AgregarTextoSeguro(
+                nextion_buffer_tx, sizeof(nextion_buffer_tx), &utilizados,
+                "gps_satelites", texto) == 0U) ||
+            (NEXTION_AgregarTextoSeguro(
+                nextion_buffer_tx, sizeof(nextion_buffer_tx), &utilizados,
+                "lblGPS", estado_gps) == 0U))
+        {
+            return HAL_ERROR;
+        }
+
+        resultado = snprintf(
+            texto, sizeof(texto), "%s %c",
+            telemetria->latitud, telemetria->hemisferio_latitud);
+        if ((resultado < 0) || ((size_t)resultado >= sizeof(texto)) ||
+            (NEXTION_AgregarTextoSeguro(
+                nextion_buffer_tx, sizeof(nextion_buffer_tx), &utilizados,
+                "tLatitud", texto) == 0U))
+        {
+            return HAL_ERROR;
+        }
+
+        resultado = snprintf(
+            texto, sizeof(texto), "%s %c",
+            telemetria->longitud, telemetria->hemisferio_longitud);
+        if ((resultado < 0) || ((size_t)resultado >= sizeof(texto)) ||
+            (NEXTION_AgregarTextoSeguro(
+                nextion_buffer_tx, sizeof(nextion_buffer_tx), &utilizados,
+                "tLongitud", texto) == 0U) ||
+            (NEXTION_AgregarDecimalX10(
+                nextion_buffer_tx, sizeof(nextion_buffer_tx), &utilizados,
+                "tvel", (int32_t)velocidad_kmh_x10, " km/h") == 0U) ||
+            (NEXTION_AgregarComando(
+                nextion_buffer_tx, sizeof(nextion_buffer_tx), &utilizados,
+                "barVEL.val=%lu", (unsigned long)barra_velocidad) == 0U))
+        {
+            return HAL_ERROR;
+        }
+
+        resultado = snprintf(
+            texto, sizeof(texto), "%03lu", (unsigned long)rumbo_entero);
+        if ((resultado < 0) || ((size_t)resultado >= sizeof(texto)) ||
+            (NEXTION_AgregarTextoSeguro(
+                nextion_buffer_tx, sizeof(nextion_buffer_tx), &utilizados,
+                "tRumbo", texto) == 0U) ||
+            (NEXTION_AgregarComando(
+                nextion_buffer_tx, sizeof(nextion_buffer_tx), &utilizados,
+                "zRumbo.val=%lu", (unsigned long)rumbo_entero) == 0U) ||
+            (NEXTION_AgregarDecimalX10(
+                nextion_buffer_tx, sizeof(nextion_buffer_tx), &utilizados,
+                "tYaw", telemetria->yaw_x10, "") == 0U) ||
+            (NEXTION_AgregarComando(
+                nextion_buffer_tx, sizeof(nextion_buffer_tx), &utilizados,
+                "zYaw.val=%lu", (unsigned long)yaw_entero) == 0U) ||
+            (NEXTION_AgregarDecimalX10(
+                nextion_buffer_tx, sizeof(nextion_buffer_tx), &utilizados,
+                "tPitch", telemetria->pitch_x10, "") == 0U) ||
+            (NEXTION_AgregarDecimalX10(
+                nextion_buffer_tx, sizeof(nextion_buffer_tx), &utilizados,
+                "tRoll", telemetria->roll_x10, "") == 0U) ||
+            (NEXTION_AgregarTextoSeguro(
+                nextion_buffer_tx, sizeof(nextion_buffer_tx), &utilizados,
+                "tInclinacion", estado_inclinacion) == 0U))
+        {
+            return HAL_ERROR;
+        }
+
+        if (NEXTION_FormatearUTC(
+                telemetria->utc, texto, sizeof(texto)) == 0U)
+        {
+            strcpy(texto, "--:--:--");
+        }
+
+        if (NEXTION_AgregarTextoSeguro(
+                nextion_buffer_tx, sizeof(nextion_buffer_tx), &utilizados,
+                "page0.tHora", texto) == 0U)
+        {
+            return HAL_ERROR;
+        }
+    }
+
+    /*
+     * La actualizacion completa se envia directamente por USART1 con tiempo
+     * limitado. Asi no depende del callback DMA TX de Nextion. Un error o
+     * timeout solo descarta esta actualizacion; UART5 sigue independiente.
+     */
+    return HAL_UART_Transmit_DMA(
+        huart,
+        nextion_buffer_tx,
+        (uint16_t)utilizados);
+#endif
 }
